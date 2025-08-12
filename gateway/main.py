@@ -1,6 +1,9 @@
 import os
 import json
 from pathlib import Path
+from typing import Optional
+from urllib.parse import urlencode
+
 from fastapi import FastAPI, Request, HTTPException, Body
 from fastapi.responses import RedirectResponse
 from starlette.middleware.sessions import SessionMiddleware
@@ -14,14 +17,18 @@ app.add_middleware(SessionMiddleware, secret_key=os.environ.get("SECRET_KEY", "d
 # ----------------------------
 # Config
 # ----------------------------
-STREAMLIT_INTERNAL_URL = os.environ.get("STREAMLIT_INTERNAL_URL", "http://localhost:8502")
+STREAMLIT_INTERNAL_URL = os.environ.get("STREAMLIT_INTERNAL_URL", "http://localhost:8502").rstrip("/")
+BASE_URL = os.environ.get("BASE_URL", "").rstrip("/")  # ex.: https://roleta-gateway.onrender.com
 
 OKTA_ISSUER = os.environ.get("OKTA_ISSUER", "")            # ex.: https://<org>.okta.com/oauth2/<authz_server_id>
 OKTA_CLIENT_ID = os.environ.get("OKTA_CLIENT_ID", "")
 OKTA_CLIENT_SECRET = os.environ.get("OKTA_CLIENT_SECRET", "")
-BASE_URL = os.environ.get("BASE_URL", "")                  # ex.: https://roleta-gateway.onrender.com
+OKTA_METADATA_URL = os.environ.get("OKTA_METADATA_URL", "")  # opcional; se setado, usamos ele
 
-# Fallback DEV (apenas se Okta não estiver habilitado)
+# Canal interno painel -> gateway
+INTERNAL_API_KEY = os.environ.get("INTERNAL_API_KEY", "")
+
+# Fallback DEV (sem Okta)
 DEV_FAKE_USER_ID = os.environ.get("DEV_FAKE_USER_ID", "")
 DEV_FAKE_EMAIL = os.environ.get("DEV_FAKE_EMAIL", "")
 
@@ -31,7 +38,7 @@ OKTA_ENABLED = bool(OKTA_ISSUER and OKTA_CLIENT_ID and OKTA_CLIENT_SECRET)
 if OKTA_ENABLED:
     oauth.register(
         name="okta",
-        server_metadata_url=f"{OKTA_ISSUER}/.well-known/openid-configuration",
+        server_metadata_url=OKTA_METADATA_URL or f"{OKTA_ISSUER}/.well-known/openid-configuration",
         client_id=OKTA_CLIENT_ID,
         client_secret=OKTA_CLIENT_SECRET,
         client_kwargs={"scope": "openid profile email"},
@@ -54,6 +61,17 @@ def require_user(request: Request):
         request.session["user"] = u
         return u
     raise HTTPException(status_code=401, detail="login required")
+
+# aceita chamadas internas do Streamlit quando vierem com cabeçalhos válidos
+def user_from_internal(request: Request) -> Optional[dict]:
+    key = request.headers.get("x-internal-key")
+    if not key or key != INTERNAL_API_KEY:
+        return None
+    sub = request.headers.get("x-user-sub")
+    email = request.headers.get("x-user-email")
+    if not sub or not email:
+        raise HTTPException(400, "missing x-user-sub/x-user-email")
+    return {"sub": sub, "email": email}
 
 # ----------------------------
 # DB wiring (SQLAlchemy async) com fallback para arquivo
@@ -130,7 +148,11 @@ async def logout(request: Request):
 # ----------------------------
 @app.get("/health")
 async def health():
-    return {"ok": True, "storage": ("db" if USE_DB else "file"), "auth": ("okta" if OKTA_ENABLED else "dev")}
+    return {
+        "ok": True,
+        "storage": ("db" if USE_DB else "file"),
+        "auth": ("okta" if OKTA_ENABLED else "dev"),
+    }
 
 @app.get("/me")
 async def me(request: Request):
@@ -139,22 +161,23 @@ async def me(request: Request):
 
 @app.get("/billing/status")
 async def billing_status(request: Request):
-    require_user(request)
+    # aceita header interno OU sessão Okta
+    _ = user_from_internal(request) or require_user(request)
     # Placeholder: voltaremos aqui quando integrar Mercado Pago
     return {"status": "active"}
 
 # ----------------------------
-# STORE (DB preferencial; fallback arquivo)
+# STORE (DB preferencial; fallback arquivo) — aceita header interno
 # ----------------------------
 if USE_DB:
     @app.get("/store")
     async def get_store(request: Request):
-        u = require_user(request)
+        u = user_from_internal(request) or require_user(request)
         async with SessionLocal() as s:
             res = await s.execute(select(User).where(User.okta_user_id == u["sub"]))
             user = res.scalar_one_or_none()
             if not user:
-                await s.execute(insert(User).values(okta_user_id=u["sub"], email=u["email"]))
+                await s.execute(insert(User).values(okta_user_id=u["sub"], email=u.get("email", "")))
                 await s.commit()
                 res = await s.execute(select(User).where(User.okta_user_id == u["sub"]))
                 user = res.scalar_one()
@@ -164,13 +187,13 @@ if USE_DB:
 
     @app.put("/store")
     async def put_store(request: Request, payload: dict = Body(...)):
-        u = require_user(request)
+        u = user_from_internal(request) or require_user(request)
         data = payload.get("data", {})
         async with SessionLocal() as s:
             res = await s.execute(select(User).where(User.okta_user_id == u["sub"]))
             user = res.scalar_one_or_none()
             if not user:
-                await s.execute(insert(User).values(okta_user_id=u["sub"], email=u["email"]))
+                await s.execute(insert(User).values(okta_user_id=u["sub"], email=u.get("email", "")))
                 await s.commit()
                 res = await s.execute(select(User).where(User.okta_user_id == u["sub"]))
                 user = res.scalar_one()
@@ -185,7 +208,7 @@ if USE_DB:
 else:
     @app.get("/store")
     async def get_store(request: Request):
-        u = require_user(request)
+        u = user_from_internal(request) or require_user(request)
         p = _store_path(u["sub"])
         if p.exists():
             try:
@@ -196,7 +219,7 @@ else:
 
     @app.put("/store")
     async def put_store(request: Request, payload: dict = Body(...)):
-        u = require_user(request)
+        u = user_from_internal(request) or require_user(request)
         data = payload.get("data", {})
         p = _store_path(u["sub"])
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -208,12 +231,15 @@ else:
 # ----------------------------
 @app.get("/app")
 async def app_root_redirect(request: Request):
-    if not get_user(request):
+    u = get_user(request)
+    if not u:
         return RedirectResponse(url="/login")
-    return RedirectResponse(url=f"{STREAMLIT_INTERNAL_URL}/app")
+    qs = urlencode({"u": u.get("sub", ""), "e": u.get("email", "")})
+    return RedirectResponse(url=f"{STREAMLIT_INTERNAL_URL}/app?{qs}")
 
-@app.api_route("/app/{path:path}", methods=["GET","POST","PUT","PATCH","DELETE"])
+@app.api_route("/app/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
 async def app_any_redirect(path: str, request: Request):
+    # para subcaminhos do Streamlit, apenas redirecionamos (sessão já criada na navegação inicial)
     if not get_user(request):
         return RedirectResponse(url="/login")
     return RedirectResponse(url=f"{STREAMLIT_INTERNAL_URL}/app/{path}")
