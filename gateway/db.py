@@ -4,8 +4,13 @@ from sqlalchemy import select
 from .models import Base, User, Store
 
 DATABASE_URL = os.environ["DATABASE_URL"]  # ex.: sqlite+aiosqlite:///C:/.../roleta.db
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+asyncpg://")
 
-engine = create_async_engine(DATABASE_URL, future=True, pool_pre_ping=True)
+if "ssl=" not in DATABASE_URL:
+    DATABASE_URL += "?ssl=require"
+
+engine = create_async_engine(DATABASE_URL, echo=True, future=True)
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False)
 
 async def init_db():
