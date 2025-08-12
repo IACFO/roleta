@@ -15,7 +15,7 @@ st.title("📊 Painel de Gerenciamento e Estratégias")
 # =========================
 # Integração com Gateway (API)
 # =========================
-API_BASE = os.environ.get("API_BASE", "http://localhost:8001")
+API_BASE = os.environ.get("API_BASE", "http://localhost:8001").rstrip("/")
 
 def api_get(path: str):
     r = requests.get(f"{API_BASE}{path}", timeout=10)
