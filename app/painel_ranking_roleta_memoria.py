@@ -16,23 +16,48 @@ st.title("📊 Painel de Gerenciamento e Estratégias")
 # Integração com Gateway (API)
 # =========================
 API_BASE = os.environ.get("API_BASE", "http://localhost:8001").rstrip("/")
+INTERNAL_API_KEY = os.environ.get("INTERNAL_API_KEY", "")
+
+# Lê ?u=<sub>&e=<email> que o gateway envia no redirect
+try:
+    qp = st.query_params  # Streamlit ≥ 1.33
+except Exception:
+    qp = st.experimental_get_query_params()
+
+def _qp_get(key: str) -> str:
+    v = qp.get(key)
+    if isinstance(v, list):
+        return v[0] if v else ""
+    return v or ""
+
+USER_SUB = _qp_get("u")
+USER_EMAIL = _qp_get("e")
+
+def _api_headers():
+    # Quando vindos do gateway, enviamos o canal interno autenticado
+    if INTERNAL_API_KEY and USER_SUB and USER_EMAIL:
+        return {
+            "x-internal-key": INTERNAL_API_KEY,
+            "x-user-sub": USER_SUB,
+            "x-user-email": USER_EMAIL,
+        }
+    return {}
 
 def api_get(path: str):
-    r = requests.get(f"{API_BASE}{path}", timeout=10)
+    r = requests.get(f"{API_BASE}{path}", headers=_api_headers(), timeout=10)
     r.raise_for_status()
     return r.json()
 
 def api_put(path: str, json_data: dict):
-    r = requests.put(f"{API_BASE}{path}", json=json_data, timeout=10)
+    r = requests.put(f"{API_BASE}{path}", json=json_data, headers=_api_headers(), timeout=10)
     r.raise_for_status()
     return r.json()
 
-# Checagem de sessão/assinatura (no DEV, gateway retorna sempre active)
+# Checagem de sessão/assinatura (no MVP, gateway retorna sempre "active")
 try:
-    me = api_get("/me")
     billing = api_get("/billing/status")
 except Exception as e:
-    st.error("❌ Não foi possível conectar ao gateway/API. Verifique se o gateway está rodando em http://localhost:8001 e tente novamente.")
+    st.error(f"❌ Não foi possível conectar ao gateway/API em {API_BASE}. Detalhe: {e}")
     st.stop()
 
 if billing.get("status") != "active":
@@ -91,7 +116,6 @@ TIPOS = (
 # =========================
 # Persistência via API (por usuário)
 # =========================
-
 def load_store():
     try:
         resp = api_get("/store")
@@ -99,7 +123,7 @@ def load_store():
     except Exception:
         data = {}
 
-    # migração antigo -> novo (compatível com a versão de arquivo JSON)
+    # migração antigo -> novo (compatível com a primeira versão em arquivo)
     if data and all(isinstance(v, int) for v in data.values()):
         old = data; data = {}
         for t in TIPOS:
@@ -152,7 +176,7 @@ with colA:
                 for v in novos:
                     if v < 0 or v > 36: raise ValueError
                 st.session_state.historico.extend(novos)
-            except:
+            except Exception:
                 st.warning("Entrada inválida. Use apenas números 0–36 separados por vírgula.")
 with colB:
     if st.button("🔄 Resetar SEQUÊNCIAS (só visual)"):
@@ -334,7 +358,6 @@ df_cont = df_cont.sort_values(["Sinal_cont","Rodadas seguidas","Máxima sequênc
 # =========================
 # Tabelas com cores
 # =========================
-
 def style_abs(row):
     s = row["Sinal_aus"]
     if s == "oposto": return "background-color: #fff3cd"
@@ -362,7 +385,6 @@ with c2:
 # =========================
 # Exportar XLSX (fallback)
 # =========================
-
 def build_excel_bytes(df_aus, df_cont):
     buffer = io.BytesIO()
     engine = None
@@ -395,7 +417,6 @@ st.subheader("🎯 Sugestões da rodada")
 
 SETOR_SIZE = {"Voisins": 17, "Tiers": 12, "Orphelins": 8}
 CAVALOS_SIZE = {"Cavalos 1-4-7": 12, "Cavalos 2-5-8": 12, "Cavalos 3-6-9": 12}
-
 
 def sugestao_principal(df_aus):
     # prioridade: Cavalos > Setor > Dúzia > Coluna > Metade > Paridade > Cor
@@ -435,7 +456,6 @@ def sugestao_principal(df_aus):
         detalhe = f" | Aus: {int(r['Rodadas ausente'])} • Média: {r['Média ausência']} • Máx: {r['Máxima ausência']}"
         return txt, (racional + detalhe)
     return None
-
 
 def sugestao_complementar(df_cont):
     # barato: Cor/Paridade/Coluna/Dúzia/Metade — prioriza quebrar forte/extremo
