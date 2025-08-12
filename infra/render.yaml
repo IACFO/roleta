@@ -1,0 +1,40 @@
+databases:
+  - name: roleta-db
+    plan: free
+
+services:
+  - type: web
+    name: roleta-gateway
+    env: python
+    rootDir: gateway
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn gateway.main:app --host 0.0.0.0 --port 10000
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: roleta-db
+          property: connectionString
+      - key: SECRET_KEY
+        generateValue: true
+      - key: STREAMLIT_INTERNAL_URL
+        value: https://roleta-app.onrender.com
+      # temporário até ligarmos Okta
+      - key: DEV_FAKE_USER_ID
+        value: dev-user-123
+      - key: DEV_FAKE_EMAIL
+        value: dev@local.test
+
+  - type: web
+    name: roleta-app
+    env: python
+    rootDir: app
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: streamlit run painel_ranking_roleta_memoria.py --server.baseUrlPath=/app --server.port=10000
+    autoDeploy: true
+    envVars:
+      - key: API_BASE
+        value: https://roleta-gateway.onrender.com
