@@ -1,0 +1,13 @@
+fastapi
+uvicorn[standard]
+httpx
+python-dotenv
+pydantic
+SQLAlchemy
+asyncpg
+aiosqlite
+alembic
+Authlib
+loguru
+itsdangerous>=2.1
+websockets
