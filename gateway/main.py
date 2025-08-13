@@ -1,12 +1,11 @@
 import os
 import json
-import secrets
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urlencode, quote
 
 from fastapi import FastAPI, Request, HTTPException, Body
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, HTMLResponse
 from starlette.middleware.sessions import SessionMiddleware
 
 # Okta via Authlib (OIDC)
@@ -21,7 +20,8 @@ app.add_middleware(SessionMiddleware, secret_key=os.environ.get("SECRET_KEY", "d
 STREAMLIT_INTERNAL_URL = os.environ.get("STREAMLIT_INTERNAL_URL", "http://localhost:8502").rstrip("/")
 BASE_URL = os.environ.get("BASE_URL", "").rstrip("/")  # ex.: https://roleta-gateway.onrender.com
 
-OKTA_ISSUER = os.environ.get("OKTA_ISSUER", "")             # https://<org>.okta.com/oauth2/<authz_server_id>
+# Okta
+OKTA_ISSUER = os.environ.get("OKTA_ISSUER", "")             # ex.: https://<org>.okta.com/oauth2/<authz_server_id>
 OKTA_CLIENT_ID = os.environ.get("OKTA_CLIENT_ID", "")
 OKTA_CLIENT_SECRET = os.environ.get("OKTA_CLIENT_SECRET", "")
 OKTA_METADATA_URL = os.environ.get("OKTA_METADATA_URL", "")  # opcional; se setado, usamos ele
@@ -29,13 +29,25 @@ OKTA_METADATA_URL = os.environ.get("OKTA_METADATA_URL", "")  # opcional; se seta
 # Canal interno painel -> gateway
 INTERNAL_API_KEY = os.environ.get("INTERNAL_API_KEY", "")
 
-# Mercado Pago (planos)
-PLAN_MONTHLY_ID = os.environ.get("PLAN_MONTHLY_ID", "")  # ex.: 2c93808491f2cb000191f7c0f6f90abc
-PLAN_YEARLY_ID  = os.environ.get("PLAN_YEARLY_ID",  "")  # ex.: 2c93808491f2cb000191f7c10a6f0def
-
-# Fallback DEV (sem Okta)
+# DEV (fallback se Okta desabilitado)
 DEV_FAKE_USER_ID = os.environ.get("DEV_FAKE_USER_ID", "")
 DEV_FAKE_EMAIL = os.environ.get("DEV_FAKE_EMAIL", "")
+
+# Mercado Pago
+MP_MODE = os.environ.get("MP_MODE", "").lower().strip()  # "sandbox" ou "prod" (opcional)
+PLAN_MONTHLY_ID = os.environ.get("PLAN_MONTHLY_ID", "")
+PLAN_YEARLY_ID  = os.environ.get("PLAN_YEARLY_ID", "")
+
+def _mp_env() -> str:
+    """
+    Determina o ambiente do Mercado Pago:
+    - Se MP_MODE=sandbox/test ⇒ sandbox
+    - Senão, infere pelo token: TEST-... ⇒ sandbox, caso contrário prod
+    """
+    if MP_MODE in ("sandbox", "teste", "test"):
+        return "sandbox"
+    token = os.environ.get("MP_ACCESS_TOKEN", "")
+    return "sandbox" if token.startswith("TEST-") else "prod"
 
 # Okta OAuth client
 oauth = OAuth()
@@ -69,7 +81,7 @@ def require_user(request: Request):
 # aceita chamadas internas do Streamlit quando vierem com cabeçalhos válidos
 def user_from_internal(request: Request) -> Optional[dict]:
     key = request.headers.get("x-internal-key")
-    if not key or not INTERNAL_API_KEY or not secrets.compare_digest(key, INTERNAL_API_KEY):
+    if not key or key != INTERNAL_API_KEY:
         return None
     sub = request.headers.get("x-user-sub")
     email = request.headers.get("x-user-email")
@@ -160,75 +172,83 @@ async def health():
 
 @app.get("/me")
 async def me(request: Request):
-    """
-    Aceita:
-      - Sessão Okta (navegador)
-      - OU headers internos do Streamlit (x-internal-key + x-user-*)
-    """
-    u = user_from_internal(request) or require_user(request)
-    return {"ok": True, "user_id": u.get("sub"), "email": u.get("email")}
+    u = require_user(request)
+    return {"user_id": u.get("sub"), "email": u.get("email")}
 
-# ----------------------------
-# Billing (status + subscribe + thankyou)
-# ----------------------------
+# Status de assinatura (placeholder até webhook)
 @app.get("/billing/status")
 async def billing_status(request: Request):
-    """
-    Por enquanto 'inactive' por padrão para forçar o checkout.
-    Assim você consegue testar o fluxo de assinatura.
-    (Depois conectamos no banco/webhook para refletir o status real.)
-    """
+    # aceita header interno OU sessão Okta
     _ = user_from_internal(request) or require_user(request)
-    return {"status": "inactive"}
+    # TODO: integrar com DB/MP para status real por usuário
+    return {"status": "active"}
 
+# ----------------------------
+# Mercado Pago: subscribe + debug + thankyou
+# ----------------------------
 @app.post("/billing/subscribe")
 async def billing_subscribe(request: Request):
-    """
-    Retorna a URL pública de checkout do Mercado Pago com seu preapproval_plan_id.
-    Parâmetro: ?plan=monthly | yearly
-    """
-    u = user_from_internal(request) or require_user(request)
+    _ = user_from_internal(request) or require_user(request)
     params = dict(request.query_params)
     plan = (params.get("plan") or "").lower()
 
     if plan == "monthly":
         plan_id = PLAN_MONTHLY_ID
+        missing = "PLAN_MONTHLY_ID"
     elif plan == "yearly":
         plan_id = PLAN_YEARLY_ID
+        missing = "PLAN_YEARLY_ID"
     else:
         raise HTTPException(400, "plan must be 'monthly' or 'yearly'")
 
     if not plan_id:
-        raise HTTPException(500, f"PLAN_{plan.upper()}_ID não configurado")
+        raise HTTPException(400, f"Variável {missing} não configurada no gateway")
 
-    # URL pública do checkout de planos do Mercado Pago
-    # Doc: https://www.mercadopago.com.br/developers/pt/docs/subscriptions
+    env = _mp_env()
+    mp_base = "https://sandbox.mercadopago.com.br" if env == "sandbox" else "https://www.mercadopago.com.br"
     back_url = f"{BASE_URL}/billing/thankyou" if BASE_URL else "/billing/thankyou"
+
     checkout_url = (
-        "https://www.mercadopago.com.br/subscriptions/checkout"
+        f"{mp_base}/subscriptions/checkout"
         f"?preapproval_plan_id={quote(plan_id)}"
         f"&back_url={quote(back_url)}"
         "&auto_return=approved"
     )
-    return {"init_point": checkout_url}
+    return {"init_point": checkout_url, "env": env}
+
+@app.get("/billing/debug")
+async def billing_debug():
+    token = os.environ.get("MP_ACCESS_TOKEN", "")
+    return {
+        "env": _mp_env(),
+        "PLAN_MONTHLY_ID": os.environ.get("PLAN_MONTHLY_ID"),
+        "PLAN_YEARLY_ID": os.environ.get("PLAN_YEARLY_ID"),
+        "token_prefix": (token[:5] + "..." if token else None),
+    }
 
 @app.get("/billing/thankyou")
-async def billing_thankyou(request: Request):
+async def billing_thankyou():
+    html = """
+    <html>
+      <head><meta charset="utf-8"><title>Assinatura</title></head>
+      <body style="font-family: sans-serif; padding: 24px;">
+        <h2>✅ Obrigado! Se a assinatura foi aprovada, seu acesso será liberado.</h2>
+        <p>Você já pode retornar ao painel.</p>
+        <p><a href="/app">Voltar ao painel</a></p>
+      </body>
+    </html>
     """
-    Página de retorno do checkout. Aqui você pode ler query params do MP,
-    exibir uma tela de sucesso e redirecionar ao /app.
-    """
-    # Simplesmente volta pro app; quando ligarmos o webhook, o status ficará 'active'.
-    return RedirectResponse(url="/app")
+    return HTMLResponse(html)
+
+# alias caso você tenha criado plano com outro back_url histórico
+@app.get("/billing/return")
+async def billing_return():
+    return await billing_thankyou()
 
 # ----------------------------
 # STORE (DB preferencial; fallback arquivo) — aceita header interno
 # ----------------------------
 if USE_DB:
-    from sqlalchemy import select, insert, update
-    from .db import SessionLocal, init_db
-    from .models import User, Store
-
     @app.get("/store")
     async def get_store(request: Request):
         u = user_from_internal(request) or require_user(request)
