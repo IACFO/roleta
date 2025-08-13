@@ -1,71 +1,87 @@
-import streamlit as st
-import pandas as pd
-import json
-import io
-from pathlib import Path
+# painel_ranking_roleta_memoria.py
+# RoletaSmart — Painel de Gerenciamento e Estratégias
+# Versão com integração ao gateway via headers internos (INTERNAL_API_KEY)
+# e tratamento de 401 (redireciono para login do gateway/Okta).
+
 import os
+import io
+import json
 import requests
+import pandas as pd
+import streamlit as st
+from pathlib import Path
 
 # =========================
-# Configuração da página
+# Config da página
 # =========================
 st.set_page_config(page_title="Ranking Roleta com Memória", layout="wide")
 st.title("📊 Painel de Gerenciamento e Estratégias")
 
 # =========================
-# Integração com Gateway (API)
+# Integração com Gateway/API
 # =========================
 API_BASE = os.environ.get("API_BASE", "http://localhost:8001").rstrip("/")
-INTERNAL_API_KEY = os.environ.get("INTERNAL_API_KEY", "")
+INTERNAL_API_KEY = os.environ.get("INTERNAL_API_KEY", "").strip()
+LOGIN_URL = os.environ.get("LOGIN_URL", "https://roleta-gateway.onrender.com/app")
 
-# Lê ?u=<sub>&e=<email> que o gateway envia no redirect
-try:
-    qp = st.query_params  # Streamlit ≥ 1.33
-except Exception:
-    qp = st.experimental_get_query_params()
+def _get_query_params():
+    # Compatível com versões antigas/novas do Streamlit
+    try:
+        return st.query_params  # Streamlit >= 1.30
+    except Exception:
+        return st.experimental_get_query_params()  # fallback
 
-def _qp_get(key: str) -> str:
-    v = qp.get(key)
-    if isinstance(v, list):
-        return v[0] if v else ""
-    return v or ""
+def _first(v):
+    return v[0] if isinstance(v, list) else v
 
-USER_SUB = _qp_get("u")
-USER_EMAIL = _qp_get("e")
+_qp = _get_query_params()
+USER_SUB = _first(_qp.get("u"))
+USER_EMAIL = _first(_qp.get("e"))
 
-def _api_headers():
-    # Quando vindos do gateway, enviamos o canal interno autenticado
-    if INTERNAL_API_KEY and USER_SUB and USER_EMAIL:
-        return {
-            "x-internal-key": INTERNAL_API_KEY,
-            "x-user-sub": USER_SUB,
-            "x-user-email": USER_EMAIL,
-        }
-    return {}
+def _auth_headers():
+    """Headers que o gateway aceita no modo 'interno' (sem redirecionar Okta)."""
+    h = {}
+    if INTERNAL_API_KEY:
+        h["x-internal-key"] = INTERNAL_API_KEY
+    if USER_SUB:
+        h["x-user-sub"] = USER_SUB
+    if USER_EMAIL:
+        h["x-user-email"] = USER_EMAIL
+    return h
 
 def api_get(path: str):
-    r = requests.get(f"{API_BASE}{path}", headers=_api_headers(), timeout=10)
+    r = requests.get(f"{API_BASE}{path}", headers=_auth_headers(), timeout=15)
     r.raise_for_status()
     return r.json()
 
 def api_put(path: str, json_data: dict):
-    r = requests.put(f"{API_BASE}{path}", json=json_data, headers=_api_headers(), timeout=10)
+    r = requests.put(f"{API_BASE}{path}", json=json_data, headers=_auth_headers(), timeout=20)
     r.raise_for_status()
     return r.json()
 
-# Checagem de sessão/assinatura (no MVP, gateway retorna sempre "active")
+# Checagem de sessão/assinatura
 try:
+    me = api_get("/me")
     billing = api_get("/billing/status")
+except requests.HTTPError as e:
+    # Se não autenticado, peça login pelo gateway (Okta)
+    if e.response is not None and e.response.status_code == 401:
+        st.error("Você precisa entrar para usar o painel.")
+        st.link_button("🔐 Entrar no painel", LOGIN_URL, use_container_width=True)
+        st.stop()
+    else:
+        st.error(f"❌ Não foi possível conectar ao gateway/API em {API_BASE}. Detalhe: {e}")
+        st.stop()
 except Exception as e:
-    st.error(f"❌ Não foi possível conectar ao gateway/API em {API_BASE}. Detalhe: {e}")
+    st.error(f"❌ Erro de conexão com o gateway/API em {API_BASE}. Detalhe: {e}")
     st.stop()
 
 if billing.get("status") != "active":
-    st.warning("Sua assinatura não está ativa. Entre em contato com o suporte.")
+    st.warning("Sua assinatura não está ativa. Entre em contato com o suporte ou finalize a assinatura.")
     st.stop()
 
 # =========================
-# PERFIL (1u = R$1)
+# Perfil (1u = R$1)
 # =========================
 UNIDADE_REAIS = 1.0  # 1u = R$1
 
@@ -114,7 +130,7 @@ TIPOS = (
 )
 
 # =========================
-# Persistência via API (por usuário)
+# Persistência via API (por usuário logado)
 # =========================
 def load_store():
     try:
@@ -123,7 +139,7 @@ def load_store():
     except Exception:
         data = {}
 
-    # migração antigo -> novo (compatível com a primeira versão em arquivo)
+    # migração (compatível com estrutura antiga simples)
     if data and all(isinstance(v, int) for v in data.values()):
         old = data; data = {}
         for t in TIPOS:
@@ -156,7 +172,7 @@ def save_store(store: dict):
 store = load_store()
 
 # =========================
-# Estado sessão
+# Estado de sessão
 # =========================
 if "historico" not in st.session_state:
     st.session_state.historico = []
@@ -197,7 +213,7 @@ if len(numeros) < 5:
     st.stop()
 
 # =========================
-# Classificação por número
+# Classificações por número
 # =========================
 vermelho = {1,3,5,7,9,12,14,16,18,19,21,23,25,27,30,32,34,36}
 preto    = {2,4,6,8,10,11,13,15,17,20,22,24,26,28,29,31,33,35}
@@ -273,7 +289,7 @@ for n in numeros:
                 store[t] = rec; cur_seq[t] = 0
             cur_gap[t] += 1
 
-# salva a memória consolidada
+# Salva memória consolidada do usuário
 save_store(store)
 
 # =========================
@@ -292,32 +308,31 @@ df_aus = pd.DataFrame({
     "Máxima ausência": [store[t]["aus_max"] for t in TIPOS],
 })
 
-# reset visual
+# Reset visual
 if st.session_state.zerar_sequencias_view:
     df_cont["Rodadas seguidas"] = 0
     df_aus["Rodadas ausente"] = 0
     st.session_state.zerar_sequencias_view = False
 
 # =========================
-# Regras (inclui METADE como Cor)
+# Regras de leitura
 # =========================
 SEQ_RULES = {
     "Setor":     {"neutro_max": 2, "med": (3,5), "forte": (6,7), "ext": (8, 10**6)},
     "Cor":       {"neutro_max": 2, "med": (3,5), "forte": (6,9), "ext": (10, 10**6)},
     "Paridade":  {"neutro_max": 2, "med": (3,5), "forte": (6,9), "ext": (10, 10**6)},
-    "Metade":    {"neutro_max": 2, "med": (3,5), "forte": (6,9), "ext": (10, 10**6)},  # igual Cor
+    "Metade":    {"neutro_max": 2, "med": (3,5), "forte": (6,9), "ext": (10, 10**6)},
     "Coluna":    {"neutro_max": 2, "med": (3,4), "forte": (5,6), "ext": (7, 10**6)},
     "Dúzia":     {"neutro_max": 2, "med": (3,4), "forte": (5,6), "ext": (7, 10**6)},
     "Cavalos":   {"neutro_max": 1, "med": (2,3), "forte": (4,4), "ext": (5, 10**6)},
 }
 
-# AUSÊNCIA (iguais às suas regras; Metade usa o mesmo “oposto da sequência” de Cor)
 ABS_RULES = {
     "Setor":   {"neutro": 4, "oposto_ini": 5,  "oposto_fim": 22, "retorno_min": 23},
     "Coluna":  {"neutro": 4, "oposto_ini": 5,  "oposto_fim": 15, "retorno_min": 16},
     "Dúzia":   {"neutro": 4, "oposto_ini": 5,  "oposto_fim": 15, "retorno_min": 16},
     "Cavalos": {"neutro": 4, "oposto_ini": 5,  "oposto_fim": 10, "retorno_min": 11},
-    # Cor / Paridade / Metade: "oposto ao da sequência"
+    # Cor / Paridade / Metade: usam a mesma gradação da regra de sequência
 }
 
 def classify_abs(tipo, aus):
@@ -351,12 +366,12 @@ def classify_seq(tipo, seq):
 df_aus[["Sinal_aus","Motivo_aus"]] = df_aus.apply(lambda r: pd.Series(classify_abs(r["Tipo"], int(r["Rodadas ausente"]))), axis=1)
 df_cont[["Sinal_cont","Motivo_cont"]] = df_cont.apply(lambda r: pd.Series(classify_seq(r["Tipo"], int(r["Rodadas seguidas"]))), axis=1)
 
-# ordenação amigável
+# Ordenação amigável
 df_aus  = df_aus.sort_values(["Sinal_aus","Rodadas ausente","Máxima ausência"], ascending=[True,False,False]).reset_index(drop=True)
 df_cont = df_cont.sort_values(["Sinal_cont","Rodadas seguidas","Máxima sequência"], ascending=[True,False,False]).reset_index(drop=True)
 
 # =========================
-# Tabelas com cores
+# Tabelas com destaque
 # =========================
 def style_abs(row):
     s = row["Sinal_aus"]
@@ -383,7 +398,7 @@ with c2:
     st.dataframe(df_cont.style.apply(lambda r: [style_seq(r)]*len(r), axis=1), use_container_width=True)
 
 # =========================
-# Exportar XLSX (fallback)
+# Exportar XLSX
 # =========================
 def build_excel_bytes(df_aus, df_cont):
     buffer = io.BytesIO()
@@ -406,9 +421,12 @@ xlsx_bytes, err = build_excel_bytes(df_aus, df_cont)
 if err:
     st.warning(f"📄 Exportação desabilitada: {err}")
 else:
-    st.download_button("📥 Baixar ranking (.xlsx)", data=xlsx_bytes,
-                       file_name="ranking_roleta.xlsx",
-                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    st.download_button(
+        "📥 Baixar ranking (.xlsx)",
+        data=xlsx_bytes,
+        file_name="ranking_roleta.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
 
 # =========================
 # Sugestões (2 por rodada)
