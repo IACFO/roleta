@@ -1,5 +1,6 @@
 import os
 import json
+import secrets
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urlencode
@@ -20,7 +21,7 @@ app.add_middleware(SessionMiddleware, secret_key=os.environ.get("SECRET_KEY", "d
 STREAMLIT_INTERNAL_URL = os.environ.get("STREAMLIT_INTERNAL_URL", "http://localhost:8502").rstrip("/")
 BASE_URL = os.environ.get("BASE_URL", "").rstrip("/")  # ex.: https://roleta-gateway.onrender.com
 
-OKTA_ISSUER = os.environ.get("OKTA_ISSUER", "")            # ex.: https://<org>.okta.com/oauth2/<authz_server_id>
+OKTA_ISSUER = os.environ.get("OKTA_ISSUER", "")             # ex.: https://<org>.okta.com/oauth2/<authz_server_id>
 OKTA_CLIENT_ID = os.environ.get("OKTA_CLIENT_ID", "")
 OKTA_CLIENT_SECRET = os.environ.get("OKTA_CLIENT_SECRET", "")
 OKTA_METADATA_URL = os.environ.get("OKTA_METADATA_URL", "")  # opcional; se setado, usamos ele
@@ -65,7 +66,8 @@ def require_user(request: Request):
 # aceita chamadas internas do Streamlit quando vierem com cabeçalhos válidos
 def user_from_internal(request: Request) -> Optional[dict]:
     key = request.headers.get("x-internal-key")
-    if not key or key != INTERNAL_API_KEY:
+    # segurança: comparação em tempo constante
+    if not key or not INTERNAL_API_KEY or not secrets.compare_digest(key, INTERNAL_API_KEY):
         return None
     sub = request.headers.get("x-user-sub")
     email = request.headers.get("x-user-email")
@@ -156,14 +158,22 @@ async def health():
 
 @app.get("/me")
 async def me(request: Request):
-    u = require_user(request)
-    return {"user_id": u.get("sub"), "email": u.get("email")}
+    """
+    Agora aceita:
+      - Sessão Okta (navegador)
+      - OU headers internos do Streamlit (x-internal-key + x-user-*)
+    """
+    u = user_from_internal(request) or require_user(request)
+    return {"ok": True, "user_id": u.get("sub"), "email": u.get("email")}
 
 @app.get("/billing/status")
 async def billing_status(request: Request):
-    # aceita header interno OU sessão Okta
+    """
+    Também aceita sessão OU headers internos.
+    Por enquanto retorna 'active' como placeholder
+    (trocaremos quando o webhook do Mercado Pago marcar no banco).
+    """
     _ = user_from_internal(request) or require_user(request)
-    # Placeholder: voltaremos aqui quando integrar Mercado Pago
     return {"status": "active"}
 
 # ----------------------------
