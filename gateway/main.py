@@ -3,7 +3,7 @@ import json
 import secrets
 from pathlib import Path
 from typing import Optional
-from urllib.parse import urlencode
+from urllib.parse import urlencode, quote
 
 from fastapi import FastAPI, Request, HTTPException, Body
 from fastapi.responses import RedirectResponse
@@ -21,13 +21,17 @@ app.add_middleware(SessionMiddleware, secret_key=os.environ.get("SECRET_KEY", "d
 STREAMLIT_INTERNAL_URL = os.environ.get("STREAMLIT_INTERNAL_URL", "http://localhost:8502").rstrip("/")
 BASE_URL = os.environ.get("BASE_URL", "").rstrip("/")  # ex.: https://roleta-gateway.onrender.com
 
-OKTA_ISSUER = os.environ.get("OKTA_ISSUER", "")             # ex.: https://<org>.okta.com/oauth2/<authz_server_id>
+OKTA_ISSUER = os.environ.get("OKTA_ISSUER", "")             # https://<org>.okta.com/oauth2/<authz_server_id>
 OKTA_CLIENT_ID = os.environ.get("OKTA_CLIENT_ID", "")
 OKTA_CLIENT_SECRET = os.environ.get("OKTA_CLIENT_SECRET", "")
 OKTA_METADATA_URL = os.environ.get("OKTA_METADATA_URL", "")  # opcional; se setado, usamos ele
 
 # Canal interno painel -> gateway
 INTERNAL_API_KEY = os.environ.get("INTERNAL_API_KEY", "")
+
+# Mercado Pago (planos)
+PLAN_MONTHLY_ID = os.environ.get("PLAN_MONTHLY_ID", "")  # ex.: 2c93808491f2cb000191f7c0f6f90abc
+PLAN_YEARLY_ID  = os.environ.get("PLAN_YEARLY_ID",  "")  # ex.: 2c93808491f2cb000191f7c10a6f0def
 
 # Fallback DEV (sem Okta)
 DEV_FAKE_USER_ID = os.environ.get("DEV_FAKE_USER_ID", "")
@@ -48,7 +52,6 @@ if OKTA_ENABLED:
 # ----------------------------
 # Auth helpers
 # ----------------------------
-
 def get_user(request: Request):
     return request.session.get("user")
 
@@ -66,7 +69,6 @@ def require_user(request: Request):
 # aceita chamadas internas do Streamlit quando vierem com cabeçalhos válidos
 def user_from_internal(request: Request) -> Optional[dict]:
     key = request.headers.get("x-internal-key")
-    # segurança: comparação em tempo constante
     if not key or not INTERNAL_API_KEY or not secrets.compare_digest(key, INTERNAL_API_KEY):
         return None
     sub = request.headers.get("x-user-sub")
@@ -159,27 +161,74 @@ async def health():
 @app.get("/me")
 async def me(request: Request):
     """
-    Agora aceita:
+    Aceita:
       - Sessão Okta (navegador)
       - OU headers internos do Streamlit (x-internal-key + x-user-*)
     """
     u = user_from_internal(request) or require_user(request)
     return {"ok": True, "user_id": u.get("sub"), "email": u.get("email")}
 
+# ----------------------------
+# Billing (status + subscribe + thankyou)
+# ----------------------------
 @app.get("/billing/status")
 async def billing_status(request: Request):
     """
-    Também aceita sessão OU headers internos.
-    Por enquanto retorna 'active' como placeholder
-    (trocaremos quando o webhook do Mercado Pago marcar no banco).
+    Por enquanto 'inactive' por padrão para forçar o checkout.
+    Assim você consegue testar o fluxo de assinatura.
+    (Depois conectamos no banco/webhook para refletir o status real.)
     """
     _ = user_from_internal(request) or require_user(request)
-    return {"status": "active"}
+    return {"status": "inactive"}
+
+@app.post("/billing/subscribe")
+async def billing_subscribe(request: Request):
+    """
+    Retorna a URL pública de checkout do Mercado Pago com seu preapproval_plan_id.
+    Parâmetro: ?plan=monthly | yearly
+    """
+    u = user_from_internal(request) or require_user(request)
+    params = dict(request.query_params)
+    plan = (params.get("plan") or "").lower()
+
+    if plan == "monthly":
+        plan_id = PLAN_MONTHLY_ID
+    elif plan == "yearly":
+        plan_id = PLAN_YEARLY_ID
+    else:
+        raise HTTPException(400, "plan must be 'monthly' or 'yearly'")
+
+    if not plan_id:
+        raise HTTPException(500, f"PLAN_{plan.upper()}_ID não configurado")
+
+    # URL pública do checkout de planos do Mercado Pago
+    # Doc: https://www.mercadopago.com.br/developers/pt/docs/subscriptions
+    back_url = f"{BASE_URL}/billing/thankyou" if BASE_URL else "/billing/thankyou"
+    checkout_url = (
+        "https://www.mercadopago.com.br/subscriptions/checkout"
+        f"?preapproval_plan_id={quote(plan_id)}"
+        f"&back_url={quote(back_url)}"
+        "&auto_return=approved"
+    )
+    return {"init_point": checkout_url}
+
+@app.get("/billing/thankyou")
+async def billing_thankyou(request: Request):
+    """
+    Página de retorno do checkout. Aqui você pode ler query params do MP,
+    exibir uma tela de sucesso e redirecionar ao /app.
+    """
+    # Simplesmente volta pro app; quando ligarmos o webhook, o status ficará 'active'.
+    return RedirectResponse(url="/app")
 
 # ----------------------------
 # STORE (DB preferencial; fallback arquivo) — aceita header interno
 # ----------------------------
 if USE_DB:
+    from sqlalchemy import select, insert, update
+    from .db import SessionLocal, init_db
+    from .models import User, Store
+
     @app.get("/store")
     async def get_store(request: Request):
         u = user_from_internal(request) or require_user(request)
