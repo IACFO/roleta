@@ -5,51 +5,56 @@ from typing import Optional
 from urllib.parse import urlencode, quote
 
 from fastapi import FastAPI, Request, HTTPException, Body
-from fastapi.responses import RedirectResponse, HTMLResponse
+from fastapi.responses import RedirectResponse, JSONResponse
 from starlette.middleware.sessions import SessionMiddleware
 
-# Okta via Authlib (OIDC)
+# Okta (OIDC)
 from authlib.integrations.starlette_client import OAuth
 
 app = FastAPI()
 app.add_middleware(SessionMiddleware, secret_key=os.environ.get("SECRET_KEY", "dev-secret"))
 
 # ----------------------------
-# Config
+# Configuração
 # ----------------------------
 STREAMLIT_INTERNAL_URL = os.environ.get("STREAMLIT_INTERNAL_URL", "http://localhost:8502").rstrip("/")
-BASE_URL = os.environ.get("BASE_URL", "").rstrip("/")  # ex.: https://roleta-gateway.onrender.com
+BASE_URL               = os.environ.get("BASE_URL", "").rstrip("/")  # ex.: https://roleta-gateway.onrender.com
 
 # Okta
-OKTA_ISSUER = os.environ.get("OKTA_ISSUER", "")             # ex.: https://<org>.okta.com/oauth2/<authz_server_id>
-OKTA_CLIENT_ID = os.environ.get("OKTA_CLIENT_ID", "")
+OKTA_ISSUER        = os.environ.get("OKTA_ISSUER", "")
+OKTA_CLIENT_ID     = os.environ.get("OKTA_CLIENT_ID", "")
 OKTA_CLIENT_SECRET = os.environ.get("OKTA_CLIENT_SECRET", "")
-OKTA_METADATA_URL = os.environ.get("OKTA_METADATA_URL", "")  # opcional; se setado, usamos ele
+OKTA_METADATA_URL  = os.environ.get("OKTA_METADATA_URL", "")  # opcional
 
-# Canal interno painel -> gateway
-INTERNAL_API_KEY = os.environ.get("INTERNAL_API_KEY", "")
+# Chave interna (Streamlit -> Gateway)
+INTERNAL_API_KEY = os.environ.get("INTERNAL_API_KEY", "").strip()
 
-# DEV (fallback se Okta desabilitado)
+# DEV fallback (sem Okta)
 DEV_FAKE_USER_ID = os.environ.get("DEV_FAKE_USER_ID", "")
-DEV_FAKE_EMAIL = os.environ.get("DEV_FAKE_EMAIL", "")
+DEV_FAKE_EMAIL   = os.environ.get("DEV_FAKE_EMAIL", "")
 
-# Mercado Pago
-MP_MODE = os.environ.get("MP_MODE", "").lower().strip()  # "sandbox" ou "prod" (opcional)
-PLAN_MONTHLY_ID = os.environ.get("PLAN_MONTHLY_ID", "")
-PLAN_YEARLY_ID  = os.environ.get("PLAN_YEARLY_ID", "")
+# Mercado Pago (planos)
+MP_MONTHLY_PLAN_ID = os.environ.get("MP_MONTHLY_PLAN_ID", "")
+MP_YEARLY_PLAN_ID  = os.environ.get("MP_YEARLY_PLAN_ID", "")
 
-def _mp_env() -> str:
-    """
-    Determina o ambiente do Mercado Pago:
-    - Se MP_MODE=sandbox/test ⇒ sandbox
-    - Senão, infere pelo token: TEST-... ⇒ sandbox, caso contrário prod
-    """
-    if MP_MODE in ("sandbox", "teste", "test"):
-        return "sandbox"
-    token = os.environ.get("MP_ACCESS_TOKEN", "")
-    return "sandbox" if token.startswith("TEST-") else "prod"
+# Banco (opcional)
+USE_DB = bool(os.environ.get("DATABASE_URL"))
+if USE_DB:
+    try:
+        from .db import SessionLocal, init_db
+        from .models import User, Store
+        from sqlalchemy import select, insert, update
+    except Exception:
+        USE_DB = False
 
-# Okta OAuth client
+# Arquivo (fallback para store)
+DATA_DIR = Path(os.environ.get("DATA_DIR", Path(__file__).parent / "data" / "stores"))
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+def _store_path(uid: str) -> Path:
+    return DATA_DIR / f"{uid}.json"
+
+# Okta OAuth
 oauth = OAuth()
 OKTA_ENABLED = bool(OKTA_ISSUER and OKTA_CLIENT_ID and OKTA_CLIENT_SECRET)
 if OKTA_ENABLED:
@@ -62,50 +67,36 @@ if OKTA_ENABLED:
     )
 
 # ----------------------------
-# Auth helpers
+# Helpers de auth
 # ----------------------------
-def get_user(request: Request):
+def get_user(request: Request) -> Optional[dict]:
     return request.session.get("user")
 
-def require_user(request: Request):
+def require_user(request: Request) -> dict:
     u = get_user(request)
     if u:
         return u
-    # Fallback DEV: somente se Okta não estiver habilitado
+    # Fallback DEV somente se Okta não estiver habilitado
     if not OKTA_ENABLED and DEV_FAKE_USER_ID and DEV_FAKE_EMAIL:
         u = {"sub": DEV_FAKE_USER_ID, "email": DEV_FAKE_EMAIL}
         request.session["user"] = u
         return u
     raise HTTPException(status_code=401, detail="login required")
 
-# aceita chamadas internas do Streamlit quando vierem com cabeçalhos válidos
 def user_from_internal(request: Request) -> Optional[dict]:
+    """
+    Autenticação por cabeçalho interno (Streamlit -> Gateway).
+    Retorna dict{ sub, email } se a chave e os headers estiverem corretos.
+    """
     key = request.headers.get("x-internal-key")
     if not key or key != INTERNAL_API_KEY:
         return None
-    sub = request.headers.get("x-user-sub")
+    sub   = request.headers.get("x-user-sub")
     email = request.headers.get("x-user-email")
     if not sub or not email:
-        raise HTTPException(400, "missing x-user-sub/x-user-email")
+        # Cabeçalhos internos devem trazer sub e email
+        raise HTTPException(status_code=400, detail="missing x-user-sub/x-user-email")
     return {"sub": sub, "email": email}
-
-# ----------------------------
-# DB wiring (SQLAlchemy async) com fallback para arquivo
-# ----------------------------
-USE_DB = bool(os.environ.get("DATABASE_URL"))
-try:
-    if USE_DB:
-        from .db import SessionLocal, init_db
-        from .models import User, Store
-        from sqlalchemy import select, insert, update
-except Exception:
-    USE_DB = False
-
-DATA_DIR = Path(os.environ.get("DATA_DIR", Path(__file__).parent / "data" / "stores"))
-DATA_DIR.mkdir(parents=True, exist_ok=True)
-
-def _store_path(uid: str) -> Path:
-    return DATA_DIR / f"{uid}.json"
 
 # ----------------------------
 # Startup
@@ -118,12 +109,11 @@ async def _startup():
         DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 # ----------------------------
-# Auth routes (Okta)
+# Rotas de login Okta
 # ----------------------------
 @app.get("/login")
 async def login(request: Request):
     if not OKTA_ENABLED:
-        # DEV sem Okta → cria sessão fake
         if DEV_FAKE_USER_ID and DEV_FAKE_EMAIL:
             request.session["user"] = {"sub": DEV_FAKE_USER_ID, "email": DEV_FAKE_EMAIL}
             return RedirectResponse(url="/app")
@@ -155,7 +145,7 @@ async def logout(request: Request):
     request.session.clear()
     if OKTA_ENABLED and id_token and BASE_URL:
         return RedirectResponse(
-            url=f"{OKTA_ISSUER}/v1/logout?id_token_hint={id_token}&post_logout_redirect_uri={BASE_URL}/"
+            url=f"{OKTA_ISSUER}/v1/logout?id_token_hint={id_token}&post_logout_redirect_uri={quote(BASE_URL + '/')}"
         )
     return RedirectResponse(url="/")
 
@@ -172,81 +162,51 @@ async def health():
 
 @app.get("/me")
 async def me(request: Request):
-    u = require_user(request)
+    """
+    >>> CORREÇÃO AQUI <<<
+    Aceita cabeçalhos internos OU sessão Okta.
+    """
+    u = user_from_internal(request) or require_user(request)
     return {"user_id": u.get("sub"), "email": u.get("email")}
 
-# Status de assinatura (placeholder até webhook)
+# ----------------------------
+# Billing (stub + subscribe links)
+# ----------------------------
 @app.get("/billing/status")
 async def billing_status(request: Request):
-    # aceita header interno OU sessão Okta
     _ = user_from_internal(request) or require_user(request)
-    # TODO: integrar com DB/MP para status real por usuário
-    return {"status": "active"}
+    # Nesta versão de testes, deixamos "inactive" para exibir os botões no app.
+    return {"status": "inactive"}
 
-# ----------------------------
-# Mercado Pago: subscribe + debug + thankyou
-# ----------------------------
 @app.post("/billing/subscribe")
-async def billing_subscribe(request: Request):
-    _ = user_from_internal(request) or require_user(request)
-    params = dict(request.query_params)
-    plan = (params.get("plan") or "").lower()
-
-    if plan == "monthly":
-        plan_id = PLAN_MONTHLY_ID
-        missing = "PLAN_MONTHLY_ID"
-    elif plan == "yearly":
-        plan_id = PLAN_YEARLY_ID
-        missing = "PLAN_YEARLY_ID"
-    else:
-        raise HTTPException(400, "plan must be 'monthly' or 'yearly'")
-
+async def billing_subscribe(request: Request, plan: str = "monthly"):
+    """
+    Retorna a URL de checkout de assinatura do Mercado Pago (planos criados no painel do MP).
+    """
+    u = user_from_internal(request) or require_user(request)
+    plan_id = MP_MONTHLY_PLAN_ID if plan == "monthly" else MP_YEARLY_PLAN_ID
     if not plan_id:
-        raise HTTPException(400, f"Variável {missing} não configurada no gateway")
+        raise HTTPException(400, detail=f"plan '{plan}' sem PLAN_ID configurado")
 
-    env = _mp_env()
-    mp_base = "https://sandbox.mercadopago.com.br" if env == "sandbox" else "https://www.mercadopago.com.br"
-    back_url = f"{BASE_URL}/billing/thankyou" if BASE_URL else "/billing/thankyou"
+    if not BASE_URL:
+        raise HTTPException(500, detail="BASE_URL não configurado")
 
-    checkout_url = (
-        f"{mp_base}/subscriptions/checkout"
+    back_url = f"{BASE_URL}/billing/thankyou"
+    init_point = (
+        "https://www.mercadopago.com.br/subscriptions/checkout"
         f"?preapproval_plan_id={quote(plan_id)}"
         f"&back_url={quote(back_url)}"
-        "&auto_return=approved"
+        f"&auto_return=approved"
     )
-    return {"init_point": checkout_url, "env": env}
-
-@app.get("/billing/debug")
-async def billing_debug():
-    token = os.environ.get("MP_ACCESS_TOKEN", "")
-    return {
-        "env": _mp_env(),
-        "PLAN_MONTHLY_ID": os.environ.get("PLAN_MONTHLY_ID"),
-        "PLAN_YEARLY_ID": os.environ.get("PLAN_YEARLY_ID"),
-        "token_prefix": (token[:5] + "..." if token else None),
-    }
+    return {"init_point": init_point, "plan": plan, "user": u}
 
 @app.get("/billing/thankyou")
 async def billing_thankyou():
-    html = """
-    <html>
-      <head><meta charset="utf-8"><title>Assinatura</title></head>
-      <body style="font-family: sans-serif; padding: 24px;">
-        <h2>✅ Obrigado! Se a assinatura foi aprovada, seu acesso será liberado.</h2>
-        <p>Você já pode retornar ao painel.</p>
-        <p><a href="/app">Voltar ao painel</a></p>
-      </body>
-    </html>
-    """
-    return HTMLResponse(html)
-
-# alias caso você tenha criado plano com outro back_url histórico
-@app.get("/billing/return")
-async def billing_return():
-    return await billing_thankyou()
+    # Após o retorno do MP, mandamos o usuário para o app
+    return RedirectResponse(url="/app")
 
 # ----------------------------
-# STORE (DB preferencial; fallback arquivo) — aceita header interno
+# STORE (DB preferencial; fallback arquivo)
 # ----------------------------
 if USE_DB:
     @app.get("/store")
@@ -260,6 +220,7 @@ if USE_DB:
                 await s.commit()
                 res = await s.execute(select(User).where(User.okta_user_id == u["sub"]))
                 user = res.scalar_one()
+
             res = await s.execute(select(Store).where(Store.user_id == user.id))
             st_row = res.scalar_one_or_none()
             return {"data": st_row.data if st_row else {}}
@@ -276,6 +237,7 @@ if USE_DB:
                 await s.commit()
                 res = await s.execute(select(User).where(User.okta_user_id == u["sub"]))
                 user = res.scalar_one()
+
             res2 = await s.execute(select(Store).where(Store.user_id == user.id))
             st_row = res2.scalar_one_or_none()
             if st_row:
@@ -306,7 +268,7 @@ else:
         return {"ok": True}
 
 # ----------------------------
-# Redirect para o Streamlit (protegido)
+# Redirecionamento para o Streamlit (protegido)
 # ----------------------------
 @app.get("/app")
 async def app_root_redirect(request: Request):
@@ -318,7 +280,6 @@ async def app_root_redirect(request: Request):
 
 @app.api_route("/app/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
 async def app_any_redirect(path: str, request: Request):
-    # para subcaminhos do Streamlit, apenas redirecionamos (sessão já criada na navegação inicial)
     if not get_user(request):
         return RedirectResponse(url="/login")
     return RedirectResponse(url=f"{STREAMLIT_INTERNAL_URL}/app/{path}")
