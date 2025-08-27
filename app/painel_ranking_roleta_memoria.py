@@ -1,6 +1,8 @@
 # painel_ranking_roleta_memoria.py
 # RoletaSmart — Painel de Gerenciamento e Estratégias
-# Versão com integração via Auth0 (substituindo Okta) e cabeçalhos internos (INTERNAL_API_KEY)
+# Versão com integração ao gateway via headers internos (INTERNAL_API_KEY)
+# e tratamento de 401 (redireciono para login do gateway/Auth0).
+
 
 import os
 import io
@@ -10,11 +12,13 @@ import pandas as pd
 import streamlit as st
 from pathlib import Path
 
+
 # =========================
 # Config da página
 # =========================
 st.set_page_config(page_title="Ranking Roleta com Memória", layout="wide")
 st.title("📊 Painel de Gerenciamento e Estratégias")
+
 
 # =========================
 # Integração com Gateway (API)
@@ -23,76 +27,67 @@ API_BASE = os.environ.get("API_BASE", "http://localhost:8001").rstrip("/")
 INTERNAL_API_KEY = os.environ.get("INTERNAL_API_KEY", "").strip()
 LOGIN_URL = os.environ.get("LOGIN_URL", "https://roleta-gateway.onrender.com/app")
 
+
 # pega u/e da URL (?u=...&e=...)
 _qp = st.query_params if hasattr(st, "query_params") else st.experimental_get_query_params()
 def _first(v): return v[0] if isinstance(v, list) else v
-USER_SUB   = _first(_qp.get("u"))
+USER_SUB = _first(_qp.get("u"))
 USER_EMAIL = _first(_qp.get("e"))
 
+
 def _auth_headers():
-    h = {}
-    if INTERNAL_API_KEY: h["x-internal-key"] = INTERNAL_API_KEY
-    if USER_SUB:        h["x-user-sub"]     = USER_SUB
-    if USER_EMAIL:      h["x-user-email"]   = USER_EMAIL
-    return h
+h = {}
+if INTERNAL_API_KEY: h["x-internal-key"] = INTERNAL_API_KEY
+if USER_SUB: h["x-user-sub"] = USER_SUB
+if USER_EMAIL: h["x-user-email"] = USER_EMAIL
+return h
+
 
 def api_get(path: str):
-    r = requests.get(f"{API_BASE}{path}", headers=_auth_headers(), timeout=15)
-    return r
+r = requests.get(f"{API_BASE}{path}", headers=_auth_headers(), timeout=15)
+return r
+
 
 def api_put(path: str, json_data: dict):
-    r = requests.put(f"{API_BASE}{path}", json=json_data, headers=_auth_headers(), timeout=20)
-    return r
+r = requests.put(f"{API_BASE}{path}", json=json_data, headers=_auth_headers(), timeout=20)
+return r
+
 
 # =========================
 # Checagem de sessão/assinatura (com tratamento de 401)
 # =========================
 try:
-    r_me = api_get("/me")
-    if r_me.status_code == 401:
-        st.error("Você precisa entrar para usar o painel.")
-        st.link_button("🔐 Entrar no painel", LOGIN_URL, use_container_width=True)
-        st.stop()
-    r_me.raise_for_status()
+r_me = api_get("/me")
+if r_me.status_code == 401:
+st.error("Você precisa entrar para usar o painel.")
+st.link_button("🔐 Entrar no painel", LOGIN_URL, use_container_width=True)
+st.stop()
+r_me.raise_for_status()
 
-    r_billing = api_get("/billing/status")
-    if r_billing.status_code == 401:
-        st.error("Você precisa entrar para usar o painel.")
-        st.link_button("🔐 Entrar no painel", LOGIN_URL, use_container_width=True)
-        st.stop()
-    r_billing.raise_for_status()
-    billing = r_billing.json()
+
+r_billing = api_get("/billing/status")
+if r_billing.status_code == 401:
+st.error("Você precisa entrar para usar o painel.")
+st.link_button("🔐 Entrar no painel", LOGIN_URL, use_container_width=True)
+st.stop()
+r_billing.raise_for_status()
+billing = r_billing.json()
+
 
 except requests.RequestException as e:
-    st.error(f"❌ Não foi possível conectar ao gateway/API em {API_BASE}. Detalhe: {e}")
-    st.stop()
+st.error(f"❌ Não foi possível conectar ao gateway/API em {API_BASE}. Detalhe: {e}")
+st.stop()
+
 
 if billing.get("status") != "active":
-    st.warning("Sua assinatura não está ativa.")
-    col_m, col_a = st.columns(2)
-    with col_m:
-        if st.button("Assinar Mensal"):
-            try:
-                r = requests.post(f"{API_BASE}/billing/subscribe",
-                                  params={"plan": "monthly"},
-                                  headers=_auth_headers(), timeout=20)
-                r.raise_for_status()
-                init_point = r.json().get("init_point")
-                st.link_button("Abrir checkout (Mensal)", init_point, use_container_width=True)
-            except Exception as e:
-                st.error(f"Falha ao criar assinatura mensal: {e}")
-    with col_a:
-        if st.button("Assinar Anual"):
-            try:
-                r = requests.post(f"{API_BASE}/billing/subscribe",
-                                  params={"plan": "yearly"},
-                                  headers=_auth_headers(), timeout=20)
-                r.raise_for_status()
-                init_point = r.json().get("init_point")
-                st.link_button("Abrir checkout (Anual)", init_point, use_container_width=True)
-            except Exception as e:
-                st.error(f"Falha ao criar assinatura anual: {e}")
-    st.stop()
+st.warning("Sua licença ainda não está ativa.")
+if st.button("💳 Ativar Licença Anual (R$89,90)"):
+try:
+r = requests.post(f"{API_BASE}/billing/subscribe",
+params={"plan": "yearly"},
+headers=_auth_headers(), timeout=20)
+r.raise_for_status()
+st.stop()
 
 # Continuação do painel original abaixo...
 # [o restante do código permanece inalterado e continuará após este ponto de verificação de login/assinatura]
