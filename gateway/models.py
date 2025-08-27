@@ -9,9 +9,4 @@ class User(Base):
     okta_user_id: Mapped[str] = mapped_column(String, unique=True, index=True)
     email: Mapped[str] = mapped_column(String, index=True)
     created_at: Mapped[str] = mapped_column(DateTime, server_default=text("CURRENT_TIMESTAMP"))
-
-class Store(Base):
-    __tablename__ = "stores"
-    user_id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    data: Mapped[dict] = mapped_column(JSON, default=dict)
-    updated_at: Mapped[str] = mapped_column(DateTime, server_default=text("CURRENT_TIMESTAMP"))
+    access_expires_at: Mapped[DateTime] = mapped_column(DateTime, nullable=True)  # NOVO
