@@ -8,8 +8,6 @@ from datetime import datetime, timedelta
 from fastapi import FastAPI, Request, HTTPException, Body
 from fastapi.responses import RedirectResponse, JSONResponse
 from starlette.middleware.sessions import SessionMiddleware
-
-# Auth0 (OIDC)
 from authlib.integrations.starlette_client import OAuth
 
 app = FastAPI()
@@ -19,25 +17,20 @@ app.add_middleware(SessionMiddleware, secret_key=os.environ.get("SECRET_KEY", "d
 # Configuração
 # ----------------------------
 STREAMLIT_INTERNAL_URL = os.environ.get("STREAMLIT_INTERNAL_URL", "http://localhost:8502").rstrip("/")
-BASE_URL               = os.environ.get("BASE_URL", "").rstrip("/")
+BASE_URL = os.environ.get("BASE_URL", "").rstrip("/")
 
-# Auth0
-AUTH0_DOMAIN        = os.environ.get("AUTH0_DOMAIN", "")
-AUTH0_CLIENT_ID     = os.environ.get("AUTH0_CLIENT_ID", "")
+AUTH0_DOMAIN = os.environ.get("AUTH0_DOMAIN", "")
+AUTH0_CLIENT_ID = os.environ.get("AUTH0_CLIENT_ID", "")
 AUTH0_CLIENT_SECRET = os.environ.get("AUTH0_CLIENT_SECRET", "")
+AUTH0_METADATA_URL = f"https://{AUTH0_DOMAIN}/.well-known/openid-configuration"
 
-# Chave interna (Streamlit -> Gateway)
 INTERNAL_API_KEY = os.environ.get("INTERNAL_API_KEY", "").strip()
-
-# DEV fallback (sem Auth0)
 DEV_FAKE_USER_ID = os.environ.get("DEV_FAKE_USER_ID", "")
-DEV_FAKE_EMAIL   = os.environ.get("DEV_FAKE_EMAIL", "")
+DEV_FAKE_EMAIL = os.environ.get("DEV_FAKE_EMAIL", "")
 
-# Mercado Pago (planos)
 MP_MONTHLY_PLAN_ID = os.environ.get("MP_MONTHLY_PLAN_ID", "")
-MP_YEARLY_PLAN_ID  = os.environ.get("MP_YEARLY_PLAN_ID", "")
+MP_YEARLY_PLAN_ID = os.environ.get("MP_YEARLY_PLAN_ID", "")
 
-# Banco (opcional)
 USE_DB = bool(os.environ.get("DATABASE_URL"))
 if USE_DB:
     try:
@@ -47,28 +40,23 @@ if USE_DB:
     except Exception:
         USE_DB = False
 
-# Arquivo (fallback para store)
 DATA_DIR = Path(os.environ.get("DATA_DIR", Path(__file__).parent / "data" / "stores"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 def _store_path(uid: str) -> Path:
     return DATA_DIR / f"{uid}.json"
 
-# Auth0 OAuth
 oauth = OAuth()
 AUTH0_ENABLED = bool(AUTH0_DOMAIN and AUTH0_CLIENT_ID and AUTH0_CLIENT_SECRET)
 if AUTH0_ENABLED:
     oauth.register(
         name="auth0",
-        server_metadata_url=f"https://{AUTH0_DOMAIN}/.well-known/openid-configuration",
+        server_metadata_url=AUTH0_METADATA_URL,
         client_id=AUTH0_CLIENT_ID,
         client_secret=AUTH0_CLIENT_SECRET,
         client_kwargs={"scope": "openid profile email"},
     )
 
-# ----------------------------
-# Helpers de auth
-# ----------------------------
 def get_user(request: Request) -> Optional[dict]:
     return request.session.get("user")
 
@@ -157,13 +145,12 @@ async def billing_status(request: Request):
         async with SessionLocal() as s:
             res = await s.execute(select(User).where(User.okta_user_id == u["sub"]))
             user = res.scalar_one_or_none()
-            if user and user.access_expires_at:
-                if datetime.utcnow() > user.access_expires_at:
-                    return {"status": "expired"}
+            if not user or not user.access_expires_at or datetime.utcnow() > user.access_expires_at:
+                return {"status": "expired"}
     return {"status": "active"}
 
 @app.post("/billing/subscribe")
-async def billing_subscribe(request: Request, plan: str = "monthly"):
+async def billing_subscribe(request: Request, plan: str = "yearly"):
     u = user_from_internal(request) or require_user(request)
     if USE_DB:
         async with SessionLocal() as s:
@@ -190,9 +177,6 @@ async def billing_subscribe(request: Request, plan: str = "monthly"):
 async def billing_thankyou():
     return RedirectResponse(url="/app")
 
-# ----------------------------
-# STORE
-# ----------------------------
 if USE_DB:
     @app.get("/store")
     async def get_store(request: Request):
@@ -201,10 +185,7 @@ if USE_DB:
             res = await s.execute(select(User).where(User.okta_user_id == u["sub"]))
             user = res.scalar_one_or_none()
             if not user:
-                await s.execute(insert(User).values(okta_user_id=u["sub"], email=u.get("email", "")))
-                await s.commit()
-                res = await s.execute(select(User).where(User.okta_user_id == u["sub"]))
-                user = res.scalar_one()
+                return JSONResponse(status_code=403, content={"error": "Acesso negado. Assinatura necessária."})
             res = await s.execute(select(Store).where(Store.user_id == user.id))
             st_row = res.scalar_one_or_none()
             return {"data": st_row.data if st_row else {}}
@@ -217,10 +198,7 @@ if USE_DB:
             res = await s.execute(select(User).where(User.okta_user_id == u["sub"]))
             user = res.scalar_one_or_none()
             if not user:
-                await s.execute(insert(User).values(okta_user_id=u["sub"], email=u.get("email", "")))
-                await s.commit()
-                res = await s.execute(select(User).where(User.okta_user_id == u["sub"]))
-                user = res.scalar_one()
+                return JSONResponse(status_code=403, content={"error": "Acesso negado. Assinatura necessária."})
             res2 = await s.execute(select(Store).where(Store.user_id == user.id))
             st_row = res2.scalar_one_or_none()
             if st_row:
@@ -250,9 +228,6 @@ else:
         p.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
         return {"ok": True}
 
-# ----------------------------
-# Redirecionamento p/ Streamlit
-# ----------------------------
 @app.get("/app")
 async def app_root_redirect(request: Request):
     u = get_user(request)
