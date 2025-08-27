@@ -50,12 +50,12 @@ MP_YEARLY_PLAN_ID  = os.environ.get("MP_YEARLY_PLAN_ID", "")
 
 USE_DB = bool(os.environ.get("DATABASE_URL"))
 if USE_DB:
-try:
-from .db import SessionLocal, init_db
-from .models import User, Store
-from sqlalchemy import select, insert, update
-except Exception:
-USE_DB = False
+    try:
+        from .db import SessionLocal, init_db
+        from .models import User, Store
+        from sqlalchemy import select, insert, update
+    except Exception:
+        USE_DB = False
 
 # Arquivo (fallback para store)
 
