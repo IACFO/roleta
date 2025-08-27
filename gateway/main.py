@@ -140,55 +140,27 @@ async def me(request: Request):
 
 @app.post("/webhook")
 async def mercado_pago_webhook(request: Request):
-if not USE_DB:
-return JSONResponse(status_code=503, content={"error": "webhook requires database support"})
+    payload = await request.json()
+    topic = request.query_params.get("topic")
 
+    # Filtra apenas notificações de assinatura (preapproval)
+    if topic == "preapproval":
+        payer_email = payload.get("payer_email")
+        if not payer_email:
+            return JSONResponse(status_code=400, content={"error": "payer_email ausente"})
 
-try:
-body = await request.json()
-event_type = body.get("type")
-data_id = body.get("data", {}).get("id")
+        if USE_DB:
+            async with SessionLocal() as s:
+                res = await s.execute(select(User).where(User.email == payer_email))
+                user = res.scalar_one_or_none()
+                if user:
+                    await s.execute(update(User).where(User.id == user.id).values(
+                        access_expires_at=datetime.utcnow() + timedelta(days=365)
+                    ))
+                    await s.commit()
+        return {"ok": True}
 
-
-if event_type != "preapproval":
-return {"status": "ignored", "reason": "not preapproval"}
-
-
-# opcional: verificar assinatura com cabeçalho X-Hub-Signature
-
-
-# buscar dados atualizados do preapproval via API (ideal, mas opcional aqui)
-
-
-async with SessionLocal() as s:
-# tenta localizar usuário pelo email do pagador ou outro identificador
-# isso depende de você salvar o subscription_id ou email no momento da assinatura
-
-
-# exemplo com email:
-payer_email = body.get("payer_email")
-if not payer_email:
-return {"status": "ignored", "reason": "missing payer_email"}
-
-
-res = await s.execute(select(User).where(User.email == payer_email))
-user = res.scalar_one_or_none()
-if not user:
-return {"status": "ignored", "reason": "user not found"}
-
-
-# estende o acesso por 1 ano
-await s.execute(update(User).where(User.id == user.id).values(
-access_expires_at=datetime.utcnow() + timedelta(days=365)
-))
-await s.commit()
-
-
-return {"status": "ok"}
-
-
-except Exception as e:
-return JSONResponse(status_code=500, content={"error": str(e)})
+    return {"ignored": True}
 
 @app.get("/billing/status")
 async def billing_status(request: Request):
