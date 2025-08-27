@@ -1,14 +1,15 @@
-# Atualização: substitui Okta por Auth0 como provedor de autenticação
-
 import os
 import json
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urlencode, quote
+from datetime import datetime, timedelta
 
 from fastapi import FastAPI, Request, HTTPException, Body
 from fastapi.responses import RedirectResponse, JSONResponse
 from starlette.middleware.sessions import SessionMiddleware
+
+# Okta (OIDC)
 from authlib.integrations.starlette_client import OAuth
 
 app = FastAPI()
@@ -18,17 +19,26 @@ app.add_middleware(SessionMiddleware, secret_key=os.environ.get("SECRET_KEY", "d
 # Configuração
 # ----------------------------
 STREAMLIT_INTERNAL_URL = os.environ.get("STREAMLIT_INTERNAL_URL", "http://localhost:8502").rstrip("/")
-BASE_URL               = os.environ.get("BASE_URL", "").rstrip("/")
-AUTH0_DOMAIN           = os.environ.get("AUTH0_DOMAIN", "").rstrip("/")
-AUTH0_CLIENT_ID        = os.environ.get("AUTH0_CLIENT_ID", "")
-AUTH0_CLIENT_SECRET    = os.environ.get("AUTH0_CLIENT_SECRET", "")
+BASE_URL               = os.environ.get("BASE_URL", "").rstrip("/")  # ex.: https://roleta-gateway.onrender.com
 
-INTERNAL_API_KEY       = os.environ.get("INTERNAL_API_KEY", "").strip()
-DEV_FAKE_USER_ID       = os.environ.get("DEV_FAKE_USER_ID", "")
-DEV_FAKE_EMAIL         = os.environ.get("DEV_FAKE_EMAIL", "")
-MP_MONTHLY_PLAN_ID     = os.environ.get("MP_MONTHLY_PLAN_ID", "")
-MP_YEARLY_PLAN_ID      = os.environ.get("MP_YEARLY_PLAN_ID", "")
+# Okta
+OKTA_ISSUER        = os.environ.get("OKTA_ISSUER", "")
+OKTA_CLIENT_ID     = os.environ.get("OKTA_CLIENT_ID", "")
+OKTA_CLIENT_SECRET = os.environ.get("OKTA_CLIENT_SECRET", "")
+OKTA_METADATA_URL  = os.environ.get("OKTA_METADATA_URL", "")  # opcional
 
+# Chave interna (Streamlit -> Gateway)
+INTERNAL_API_KEY = os.environ.get("INTERNAL_API_KEY", "").strip()
+
+# DEV fallback (sem Okta)
+DEV_FAKE_USER_ID = os.environ.get("DEV_FAKE_USER_ID", "")
+DEV_FAKE_EMAIL   = os.environ.get("DEV_FAKE_EMAIL", "")
+
+# Mercado Pago (planos)
+MP_MONTHLY_PLAN_ID = os.environ.get("MP_MONTHLY_PLAN_ID", "")
+MP_YEARLY_PLAN_ID  = os.environ.get("MP_YEARLY_PLAN_ID", "")
+
+# Banco (opcional)
 USE_DB = bool(os.environ.get("DATABASE_URL"))
 if USE_DB:
     try:
@@ -38,21 +48,24 @@ if USE_DB:
     except Exception:
         USE_DB = False
 
+# Arquivo (fallback para store)
 DATA_DIR = Path(os.environ.get("DATA_DIR", Path(__file__).parent / "data" / "stores"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 def _store_path(uid: str) -> Path:
     return DATA_DIR / f"{uid}.json"
 
-# Auth0
+# Okta OAuth
 oauth = OAuth()
-oauth.register(
-    name="auth0",
-    client_id=AUTH0_CLIENT_ID,
-    client_secret=AUTH0_CLIENT_SECRET,
-    client_kwargs={"scope": "openid profile email"},
-    server_metadata_url=f"https://{AUTH0_DOMAIN}/.well-known/openid-configuration"
-)
+OKTA_ENABLED = bool(OKTA_ISSUER and OKTA_CLIENT_ID and OKTA_CLIENT_SECRET)
+if OKTA_ENABLED:
+    oauth.register(
+        name="okta",
+        server_metadata_url=OKTA_METADATA_URL or f"{OKTA_ISSUER}/.well-known/openid-configuration",
+        client_id=OKTA_CLIENT_ID,
+        client_secret=OKTA_CLIENT_SECRET,
+        client_kwargs={"scope": "openid profile email"},
+    )
 
 # ----------------------------
 # Helpers de auth
@@ -64,7 +77,8 @@ def require_user(request: Request) -> dict:
     u = get_user(request)
     if u:
         return u
-    if DEV_FAKE_USER_ID and DEV_FAKE_EMAIL:
+    # Fallback DEV somente se Okta não estiver habilitado
+    if not OKTA_ENABLED and DEV_FAKE_USER_ID and DEV_FAKE_EMAIL:
         u = {"sub": DEV_FAKE_USER_ID, "email": DEV_FAKE_EMAIL}
         request.session["user"] = u
         return u
@@ -74,15 +88,12 @@ def user_from_internal(request: Request) -> Optional[dict]:
     key = request.headers.get("x-internal-key")
     if not key or key != INTERNAL_API_KEY:
         return None
-    sub   = request.headers.get("x-user-sub")
+    sub = request.headers.get("x-user-sub")
     email = request.headers.get("x-user-email")
     if not sub or not email:
         raise HTTPException(status_code=400, detail="missing x-user-sub/x-user-email")
     return {"sub": sub, "email": email}
 
-# ----------------------------
-# Startup
-# ----------------------------
 @app.on_event("startup")
 async def _startup():
     if USE_DB:
@@ -90,22 +101,26 @@ async def _startup():
     else:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-# ----------------------------
-# Rotas de login Auth0
-# ----------------------------
 @app.get("/login")
 async def login(request: Request):
+    if not OKTA_ENABLED:
+        if DEV_FAKE_USER_ID and DEV_FAKE_EMAIL:
+            request.session["user"] = {"sub": DEV_FAKE_USER_ID, "email": DEV_FAKE_EMAIL}
+            return RedirectResponse(url="/app")
+        raise HTTPException(500, "Okta não configurado e DEV_FAKE_* ausentes.")
     if not BASE_URL:
         raise HTTPException(500, "BASE_URL não configurado.")
     redirect_uri = f"{BASE_URL}/callback"
-    return await oauth.auth0.authorize_redirect(request, redirect_uri)
+    return await oauth.okta.authorize_redirect(request, redirect_uri)
 
 @app.get("/callback")
 async def auth_callback(request: Request):
-    token = await oauth.auth0.authorize_access_token(request)
+    if not OKTA_ENABLED:
+        return RedirectResponse(url="/app")
+    token = await oauth.okta.authorize_access_token(request)
     userinfo = token.get("userinfo")
     if not userinfo:
-        userinfo = await oauth.auth0.parse_id_token(request, token)
+        userinfo = await oauth.okta.parse_id_token(request, token)
     request.session["user"] = {
         "sub": userinfo.get("sub"),
         "email": userinfo.get("email"),
@@ -118,21 +133,18 @@ async def auth_callback(request: Request):
 async def logout(request: Request):
     id_token = request.session.pop("id_token", None)
     request.session.clear()
-    if id_token and BASE_URL:
+    if OKTA_ENABLED and id_token and BASE_URL:
         return RedirectResponse(
-            url=f"https://{AUTH0_DOMAIN}/v2/logout?client_id={AUTH0_CLIENT_ID}&returnTo={quote(BASE_URL + '/')}"
+            url=f"{OKTA_ISSUER}/v1/logout?id_token_hint={id_token}&post_logout_redirect_uri={quote(BASE_URL + '/')}"
         )
     return RedirectResponse(url="/")
 
-# ----------------------------
-# Básico
-# ----------------------------
 @app.get("/health")
 async def health():
     return {
         "ok": True,
         "storage": ("db" if USE_DB else "file"),
-        "auth": "auth0",
+        "auth": ("okta" if OKTA_ENABLED else "dev"),
     }
 
 @app.get("/me")
@@ -140,20 +152,31 @@ async def me(request: Request):
     u = user_from_internal(request) or require_user(request)
     return {"user_id": u.get("sub"), "email": u.get("email")}
 
-# ----------------------------
-# Billing
-# ----------------------------
 @app.get("/billing/status")
 async def billing_status(request: Request):
-    _ = user_from_internal(request) or require_user(request)
-    return {"status": "inactive"}
+    u = user_from_internal(request) or require_user(request)
+    if USE_DB:
+        async with SessionLocal() as s:
+            res = await s.execute(select(User).where(User.okta_user_id == u["sub"]))
+            user = res.scalar_one_or_none()
+            if user and user.access_expires_at:
+                if datetime.utcnow() > user.access_expires_at:
+                    return {"status": "expired"}
+    return {"status": "active"}
 
 @app.post("/billing/subscribe")
 async def billing_subscribe(request: Request, plan: str = "monthly"):
     u = user_from_internal(request) or require_user(request)
-    plan_id = MP_MONTHLY_PLAN_ID if plan == "monthly" else MP_YEARLY_PLAN_ID
+    if USE_DB:
+        async with SessionLocal() as s:
+            res = await s.execute(select(User).where(User.okta_user_id == u["sub"]))
+            user = res.scalar_one_or_none()
+            if user:
+                await s.execute(update(User).where(User.id == user.id).values(access_expires_at=datetime.utcnow() + timedelta(days=365)))
+                await s.commit()
+    plan_id = MP_YEARLY_PLAN_ID
     if not plan_id:
-        raise HTTPException(400, detail=f"plan '{plan}' sem PLAN_ID configurado")
+        raise HTTPException(400, detail="plan 'yearly' sem PLAN_ID configurado")
     if not BASE_URL:
         raise HTTPException(500, detail="BASE_URL não configurado")
     back_url = f"{BASE_URL}/billing/thankyou"
