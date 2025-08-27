@@ -17,7 +17,7 @@ from pathlib import Path
 # Config da página
 # =========================
 st.set_page_config(page_title="Ranking Roleta com Memória", layout="wide")
-st.title("📊 Painel de Gerenciamento e Estratégias")
+st.title("📊 Roleta Smart - Painel de Gerenciamento e Estratégias")
 
 
 # =========================
@@ -139,6 +139,65 @@ extremo_pct = PERFIS[perfil]["extremo_pct"]
 cap_expo    = PERFIS[perfil]["cap_expo"]
 stake_n_por = PERFIS[perfil]["stake_por_numero"]
 
+with st.sidebar.expander("📘 Tutorial do Painel", expanded=False):
+    st.markdown("""
+### 👋 Bem-vindo ao Painel de Estratégias RoletaSmart
+
+Este painel foi criado para ajudar você a tomar decisões mais estratégicas ao analisar os padrões de comportamento da roleta.
+
+---
+
+### 🔢 Inserção de Números
+
+- Use o campo **"Insira números"** para digitar os resultados da roleta (ex: `23, 8, 17`).
+- Os números são acumulados no histórico.
+
+---
+
+### 🧠 Como o painel analisa
+
+- O sistema monitora os principais tipos de aposta (cor, dúzia, coluna, setor, etc.).
+- Calcula sequências atuais e ausências, médias e máximos.
+- Classifica oportunidades como **neutras**, **fortes**, **extremas**, com base na leitura comportamental de apostadores experientes.
+
+---
+
+### 🎯 Sugestões de Entrada
+
+- O painel exibe duas sugestões:
+  - **Principal (valor)**: baseada em padrões longos de ausência.
+  - **Complementar (barata)**: baseada em sequência ou quebra de padrão.
+
+---
+
+### ⚠️ Importante
+
+- Este painel **não é um sistema de apostas**.
+- Ele **não garante lucro**. É uma **ferramenta de apoio à análise**.
+- Use com responsabilidade.
+
+---
+
+### ❓Dúvidas?
+
+🔗 [Entre em contato com o suporte ou acesse](https://chat.whatsapp.com/EhVB89mUzN5HGIabDtbfCC).
+
+---
+    """)
+
+with st.sidebar.expander("💬 Comunidade / Suporte", expanded=False):
+    st.markdown("""
+Entre em nossa **comunidade oficial no WhatsApp** para:
+
+- Tirar dúvidas sobre o uso do painel.
+- Receber dicas e atualizações.
+- Compartilhar experiências com outros usuários.
+
+👉 **Atenção**: o grupo é exclusivo para assinantes e será usado também como canal de suporte direto.
+
+🔗 [Clique aqui para entrar no grupo](https://chat.whatsapp.com/EhVB89mUzN5HGIabDtbfCC)
+    """)
+
 # =========================
 # Tipos monitorados
 # =========================
@@ -215,7 +274,7 @@ with colA:
             except Exception:
                 st.warning("Entrada inválida. Use apenas números 0–36 separados por vírgula.")
 with colB:
-    if st.button("🔄 Resetar SEQUÊNCIAS (só visual)"):
+    if st.button("🔄 Resetar SEQUÊNCIAS"):
         st.session_state.zerar_sequencias_view = True
         st.success("Sequências zeradas na exibição (histórico/médias/máximos preservados).")
 with colC:
