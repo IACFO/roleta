@@ -36,58 +36,65 @@ USER_EMAIL = _first(_qp.get("e"))
 
 
 def _auth_headers():
-h = {}
-if INTERNAL_API_KEY: h["x-internal-key"] = INTERNAL_API_KEY
-if USER_SUB: h["x-user-sub"] = USER_SUB
-if USER_EMAIL: h["x-user-email"] = USER_EMAIL
-return h
+    h = {}
+    if INTERNAL_API_KEY:
+        h["x-internal-key"] = INTERNAL_API_KEY
+    if USER_SUB:
+        h["x-user-sub"] = USER_SUB
+    if USER_EMAIL:
+        h["x-user-email"] = USER_EMAIL
+    return h
+
 
 
 def api_get(path: str):
-r = requests.get(f"{API_BASE}{path}", headers=_auth_headers(), timeout=15)
-return r
+    r = requests.get(f"{API_BASE}{path}", headers=_auth_headers(), timeout=15)
+    return r
 
 
 def api_put(path: str, json_data: dict):
-r = requests.put(f"{API_BASE}{path}", json=json_data, headers=_auth_headers(), timeout=20)
-return r
+    r = requests.put(f"{API_BASE}{path}", json=json_data, headers=_auth_headers(), timeout=20)
+    return r
 
 
 # =========================
 # Checagem de sessão/assinatura (com tratamento de 401)
 # =========================
 try:
-r_me = api_get("/me")
-if r_me.status_code == 401:
-st.error("Você precisa entrar para usar o painel.")
-st.link_button("🔐 Entrar no painel", LOGIN_URL, use_container_width=True)
-st.stop()
-r_me.raise_for_status()
+    r_me = api_get("/me")
+    if r_me.status_code == 401:
+        st.error("Você precisa entrar para usar o painel.")
+        st.link_button("🔐 Entrar no painel", LOGIN_URL, use_container_width=True)
+        st.stop()
+    r_me.raise_for_status()
 
-
-r_billing = api_get("/billing/status")
-if r_billing.status_code == 401:
-st.error("Você precisa entrar para usar o painel.")
-st.link_button("🔐 Entrar no painel", LOGIN_URL, use_container_width=True)
-st.stop()
-r_billing.raise_for_status()
-billing = r_billing.json()
-
+    r_billing = api_get("/billing/status")
+    if r_billing.status_code == 401:
+        st.error("Você precisa entrar para usar o painel.")
+        st.link_button("🔐 Entrar no painel", LOGIN_URL, use_container_width=True)
+        st.stop()
+    r_billing.raise_for_status()
+    billing = r_billing.json()
 
 except requests.RequestException as e:
-st.error(f"❌ Não foi possível conectar ao gateway/API em {API_BASE}. Detalhe: {e}")
-st.stop()
+    st.error(f"❌ Não foi possível conectar ao gateway/API em {API_BASE}. Detalhe: {e}")
+    st.stop()
 
 
 if billing.get("status") != "active":
-st.warning("Sua licença ainda não está ativa.")
-if st.button("💳 Ativar Licença Anual (R$89,90)"):
-try:
-r = requests.post(f"{API_BASE}/billing/subscribe",
-params={"plan": "yearly"},
-headers=_auth_headers(), timeout=20)
-r.raise_for_status()
-st.stop()
+    st.warning("Sua licença ainda não está ativa.")
+    if st.button("💳 Ativar Licença Anual (R$89,90)"):
+        try:
+            r = requests.post(
+                f"{API_BASE}/billing/subscribe",
+                params={"plan": "yearly"},
+                headers=_auth_headers(),
+                timeout=20,
+            )
+            r.raise_for_status()
+            st.stop()
+        except requests.RequestException as e:
+            st.error(f"Erro ao tentar ativar licença: {e}")
 
 # Continuação do painel original abaixo...
 # [o restante do código permanece inalterado e continuará após este ponto de verificação de login/assinatura]
