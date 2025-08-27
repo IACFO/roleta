@@ -1,7 +1,6 @@
 # painel_ranking_roleta_memoria.py
 # RoletaSmart — Painel de Gerenciamento e Estratégias
-# Versão com integração ao gateway via headers internos (INTERNAL_API_KEY)
-# e tratamento de 401 (redireciono para login do gateway/Okta).
+# Versão com integração via Auth0 (substituindo Okta) e cabeçalhos internos (INTERNAL_API_KEY)
 
 import os
 import io
@@ -94,6 +93,10 @@ if billing.get("status") != "active":
             except Exception as e:
                 st.error(f"Falha ao criar assinatura anual: {e}")
     st.stop()
+
+# Continuação do painel original abaixo...
+# [o restante do código permanece inalterado e continuará após este ponto de verificação de login/assinatura]
+
 
 # =========================
 # Perfil (1u = R$1)
