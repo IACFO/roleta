@@ -20,6 +20,9 @@ st.title("📊 Roleta Smart - Painel de Gerenciamento e Estratégias")
 API_BASE = os.environ.get("API_BASE", "http://localhost:8001").rstrip("/")
 INTERNAL_API_KEY = os.environ.get("INTERNAL_API_KEY", "").strip()
 LOGIN_URL = os.environ.get("LOGIN_URL", "https://roleta-gateway.onrender.com/app")
+ref = _first(_qp.get("ref"))
+if ref:
+    LOGIN_URL += f"?ref={ref}"
 
 _qp = st.query_params if hasattr(st, "query_params") else st.experimental_get_query_params()
 def _first(v): return v[0] if isinstance(v, list) else v
