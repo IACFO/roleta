@@ -100,8 +100,12 @@ async def login(request: Request):
 async def auth_callback(request: Request):
     if not AUTH0_ENABLED:
         return RedirectResponse(url="/app")
+
     token = await oauth.auth0.authorize_access_token(request)
-    userinfo = token.get("userinfo") or await oauth.auth0.parse_id_token(request, token)
+    userinfo = token.get("userinfo")
+    if not userinfo:
+        userinfo = await oauth.auth0.parse_id_token(request, token)
+
     user_data = {
         "sub": userinfo.get("sub"),
         "email": userinfo.get("email"),
@@ -110,6 +114,9 @@ async def auth_callback(request: Request):
     request.session["user"] = user_data
     request.session["id_token"] = token.get("id_token")
 
+    # 🔍 Captura o código de referência da URL original
+    referral_code = request.query_params.get("ref")
+
     if USE_DB:
         async with SessionLocal() as s:
             res = await s.execute(select(User).where(User.okta_user_id == user_data["sub"]))
@@ -117,7 +124,8 @@ async def auth_callback(request: Request):
             if not user:
                 await s.execute(insert(User).values(
                     okta_user_id=user_data["sub"],
-                    email=user_data["email"]
+                    email=user_data["email"],
+                    referral_code=referral_code  # 🆕 registra a origem
                 ))
                 await s.commit()
     return RedirectResponse(url="/app")
