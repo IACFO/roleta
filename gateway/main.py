@@ -107,12 +107,24 @@ async def auth_callback(request: Request):
     userinfo = token.get("userinfo")
     if not userinfo:
         userinfo = await oauth.auth0.parse_id_token(request, token)
-    request.session["user"] = {
+    user_data = {
         "sub": userinfo.get("sub"),
         "email": userinfo.get("email"),
         "name": userinfo.get("name"),
     }
+    request.session["user"] = user_data
     request.session["id_token"] = token.get("id_token")
+
+    if USE_DB:
+        async with SessionLocal() as s:
+            res = await s.execute(select(User).where(User.okta_user_id == user_data["sub"]))
+            user = res.scalar_one_or_none()
+            if not user:
+                await s.execute(insert(User).values(
+                    okta_user_id=user_data["sub"],
+                    email=user_data["email"]
+                ))
+                await s.commit()
     return RedirectResponse(url="/app")
 
 @app.get("/logout")
