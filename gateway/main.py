@@ -179,15 +179,15 @@ async def billing_status(request: Request):
 @app.post("/billing/subscribe")
 async def billing_subscribe(request: Request, plan: str = "yearly"):
     u = user_from_internal(request) or require_user(request)
-    if USE_DB:
-        async with SessionLocal() as s:
-            res = await s.execute(select(User).where(User.okta_user_id == u["sub"]))
-            user = res.scalar_one_or_none()
-            if user:
-                await s.execute(update(User).where(User.id == user.id).values(
-                    access_expires_at=datetime.utcnow() + timedelta(days=365)
-                ))
-                await s.commit()
+
+    # ❌ REMOVA esta ativação prematura
+    # async with SessionLocal() as s:
+    #     res = await s.execute(select(User).where(User.okta_user_id == u["sub"]))
+    #     user = res.scalar_one_or_none()
+    #     if user:
+    #         await s.execute(update(User).where(User.id == user.id).values(access_expires_at=datetime.utcnow() + timedelta(days=365)))
+    #         await s.commit()
+
     plan_id = MP_YEARLY_PLAN_ID
     if not plan_id:
         raise HTTPException(400, detail="plan 'yearly' sem PLAN_ID configurado")
