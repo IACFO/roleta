@@ -68,17 +68,22 @@ if billing.get("status") != "active":
     st.warning("Sua licença ainda não está ativa.")
     if st.button("💳 Ativar Licença Anual (R$89,90)"):
         try:
-            r = api_post("/billing/subscribe", params={"plan": "yearly"})
+            r = requests.post(
+                f"{API_BASE}/billing/subscribe",
+                params={"plan": "yearly"},
+                headers=_auth_headers(),
+                timeout=20,
+            )
             r.raise_for_status()
             init_point = r.json().get("init_point")
-            if init_point:
-                st.markdown(f"[Clique aqui para pagar e ativar seu acesso]({init_point})")
+            if not init_point:
+                st.error("Erro: link de pagamento não recebido.")
             else:
-                st.error("Falha ao gerar o link de pagamento. Tente novamente mais tarde.")
-            st.stop()
+                st.success("Redirecionando para checkout seguro...")
+                st.experimental_redirect(init_point)
         except requests.RequestException as e:
             st.error(f"Erro ao tentar ativar licença: {e}")
-            st.stop()
+
 
 # Se chegou aqui, o usuário está autenticado e tem assinatura ativa
 
