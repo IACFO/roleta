@@ -1,5 +1,3 @@
-# painel_ranking_roleta_memoria.py
-
 import os
 import io
 import json
@@ -9,26 +7,31 @@ import streamlit as st
 from pathlib import Path
 
 # =========================
-# Configuração da página
+# Config da página
 # =========================
 st.set_page_config(page_title="Ranking Roleta com Memória", layout="wide")
 st.title("📊 Roleta Smart - Painel de Gerenciamento e Estratégias")
 
 # =========================
-# Integração com o Gateway
+# Integração com Gateway (API)
 # =========================
 API_BASE = os.environ.get("API_BASE", "http://localhost:8001").rstrip("/")
 INTERNAL_API_KEY = os.environ.get("INTERNAL_API_KEY", "").strip()
 LOGIN_URL = os.environ.get("LOGIN_URL", "https://roleta-gateway.onrender.com/app")
-ref = _first(_qp.get("ref"))
-if ref:
-    LOGIN_URL += f"?ref={ref}"
 
+# =========================
+# Parâmetros da URL (u=ID, e=email, ref=campanha)
+# =========================
 _qp = st.query_params if hasattr(st, "query_params") else st.experimental_get_query_params()
-def _first(v): return v[0] if isinstance(v, list) else v
+
+def _first(v): 
+    return v[0] if isinstance(v, list) else v
+
 USER_SUB = _first(_qp.get("u"))
 USER_EMAIL = _first(_qp.get("e"))
+REF_CAMPAIGN = _first(_qp.get("ref"))
 
+# Headers da API com autenticação e referência (se houver)
 def _auth_headers():
     h = {}
     if INTERNAL_API_KEY:
@@ -37,6 +40,8 @@ def _auth_headers():
         h["x-user-sub"] = USER_SUB
     if USER_EMAIL:
         h["x-user-email"] = USER_EMAIL
+    if REF_CAMPAIGN:
+        h["x-ref"] = REF_CAMPAIGN
     return h
 
 def api_get(path: str):
@@ -44,6 +49,9 @@ def api_get(path: str):
 
 def api_post(path: str, params=None):
     return requests.post(f"{API_BASE}{path}", params=params, headers=_auth_headers(), timeout=20)
+
+def api_put(path: str, json_data: dict):
+    return requests.put(f"{API_BASE}{path}", json=json_data, headers=_auth_headers(), timeout=20)
 
 # =========================
 # Checagem de Sessão / Assinatura
