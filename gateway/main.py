@@ -13,9 +13,6 @@ from authlib.integrations.starlette_client import OAuth
 app = FastAPI()
 app.add_middleware(SessionMiddleware, secret_key=os.environ.get("SECRET_KEY", "dev-secret"))
 
-# ----------------------------
-# Configuração
-# ----------------------------
 STREAMLIT_INTERNAL_URL = os.environ.get("STREAMLIT_INTERNAL_URL", "http://localhost:8502").rstrip("/")
 BASE_URL = os.environ.get("BASE_URL", "").rstrip("/")
 
@@ -104,9 +101,7 @@ async def auth_callback(request: Request):
     if not AUTH0_ENABLED:
         return RedirectResponse(url="/app")
     token = await oauth.auth0.authorize_access_token(request)
-    userinfo = token.get("userinfo")
-    if not userinfo:
-        userinfo = await oauth.auth0.parse_id_token(request, token)
+    userinfo = token.get("userinfo") or await oauth.auth0.parse_id_token(request, token)
     user_data = {
         "sub": userinfo.get("sub"),
         "email": userinfo.get("email"),
@@ -154,13 +149,10 @@ async def me(request: Request):
 async def mercado_pago_webhook(request: Request):
     payload = await request.json()
     topic = request.query_params.get("topic")
-
-    # Filtra apenas notificações de assinatura (preapproval)
     if topic == "preapproval":
         payer_email = payload.get("payer_email")
         if not payer_email:
             return JSONResponse(status_code=400, content={"error": "payer_email ausente"})
-
         if USE_DB:
             async with SessionLocal() as s:
                 res = await s.execute(select(User).where(User.email == payer_email))
@@ -171,7 +163,6 @@ async def mercado_pago_webhook(request: Request):
                     ))
                     await s.commit()
         return {"ok": True}
-
     return {"ignored": True}
 
 @app.get("/billing/status")
@@ -193,7 +184,9 @@ async def billing_subscribe(request: Request, plan: str = "yearly"):
             res = await s.execute(select(User).where(User.okta_user_id == u["sub"]))
             user = res.scalar_one_or_none()
             if user:
-                await s.execute(update(User).where(User.id == user.id).values(access_expires_at=datetime.utcnow() + timedelta(days=365)))
+                await s.execute(update(User).where(User.id == user.id).values(
+                    access_expires_at=datetime.utcnow() + timedelta(days=365)
+                ))
                 await s.commit()
     plan_id = MP_YEARLY_PLAN_ID
     if not plan_id:
@@ -213,6 +206,7 @@ async def billing_subscribe(request: Request, plan: str = "yearly"):
 async def billing_thankyou():
     return RedirectResponse(url="/app")
 
+# Store endpoints
 if USE_DB:
     @app.get("/store")
     async def get_store(request: Request):
@@ -220,7 +214,7 @@ if USE_DB:
         async with SessionLocal() as s:
             res = await s.execute(select(User).where(User.okta_user_id == u["sub"]))
             user = res.scalar_one_or_none()
-            if not user:
+            if not user or not user.access_expires_at or datetime.utcnow() > user.access_expires_at:
                 return JSONResponse(status_code=403, content={"error": "Acesso negado. Assinatura necessária."})
             res = await s.execute(select(Store).where(Store.user_id == user.id))
             st_row = res.scalar_one_or_none()
@@ -233,7 +227,7 @@ if USE_DB:
         async with SessionLocal() as s:
             res = await s.execute(select(User).where(User.okta_user_id == u["sub"]))
             user = res.scalar_one_or_none()
-            if not user:
+            if not user or not user.access_expires_at or datetime.utcnow() > user.access_expires_at:
                 return JSONResponse(status_code=403, content={"error": "Acesso negado. Assinatura necessária."})
             res2 = await s.execute(select(Store).where(Store.user_id == user.id))
             st_row = res2.scalar_one_or_none()
@@ -244,6 +238,7 @@ if USE_DB:
             await s.commit()
         return {"ok": True}
 else:
+    # Fallback to local file storage
     @app.get("/store")
     async def get_store(request: Request):
         u = user_from_internal(request) or require_user(request)
