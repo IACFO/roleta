@@ -80,10 +80,10 @@ if billing.get("status") != "active":
                 st.error("Erro: link de pagamento não recebido.")
             else:
                 st.success("Redirecionando para checkout seguro...")
-                st.experimental_redirect(init_point)
+                st.markdown(f'<meta http-equiv="refresh" content="0;URL=\'{init_point}\'" />', unsafe_allow_html=True)
         except requests.RequestException as e:
             st.error(f"Erro ao tentar ativar licença: {e}")
-
+    st.stop()  # 🔴 ESSENCIAL: bloqueia execução do restante
 
 # Se chegou aqui, o usuário está autenticado e tem assinatura ativa
 
