@@ -1,8 +1,4 @@
 # painel_ranking_roleta_memoria.py
-# RoletaSmart — Painel de Gerenciamento e Estratégias
-# Versão com integração ao gateway via headers internos (INTERNAL_API_KEY)
-# e tratamento de 401 (redireciono para login do gateway/Auth0).
-
 
 import os
 import io
@@ -12,28 +8,23 @@ import pandas as pd
 import streamlit as st
 from pathlib import Path
 
-
 # =========================
-# Config da página
+# Configuração da página
 # =========================
 st.set_page_config(page_title="Ranking Roleta com Memória", layout="wide")
 st.title("📊 Roleta Smart - Painel de Gerenciamento e Estratégias")
 
-
 # =========================
-# Integração com Gateway (API)
+# Integração com o Gateway
 # =========================
 API_BASE = os.environ.get("API_BASE", "http://localhost:8001").rstrip("/")
 INTERNAL_API_KEY = os.environ.get("INTERNAL_API_KEY", "").strip()
 LOGIN_URL = os.environ.get("LOGIN_URL", "https://roleta-gateway.onrender.com/app")
 
-
-# pega u/e da URL (?u=...&e=...)
 _qp = st.query_params if hasattr(st, "query_params") else st.experimental_get_query_params()
 def _first(v): return v[0] if isinstance(v, list) else v
 USER_SUB = _first(_qp.get("u"))
 USER_EMAIL = _first(_qp.get("e"))
-
 
 def _auth_headers():
     h = {}
@@ -45,20 +36,14 @@ def _auth_headers():
         h["x-user-email"] = USER_EMAIL
     return h
 
-
-
 def api_get(path: str):
-    r = requests.get(f"{API_BASE}{path}", headers=_auth_headers(), timeout=15)
-    return r
+    return requests.get(f"{API_BASE}{path}", headers=_auth_headers(), timeout=15)
 
-
-def api_put(path: str, json_data: dict):
-    r = requests.put(f"{API_BASE}{path}", json=json_data, headers=_auth_headers(), timeout=20)
-    return r
-
+def api_post(path: str, params=None):
+    return requests.post(f"{API_BASE}{path}", params=params, headers=_auth_headers(), timeout=20)
 
 # =========================
-# Checagem de sessão/assinatura (com tratamento de 401)
+# Checagem de Sessão / Assinatura
 # =========================
 try:
     r_me = api_get("/me")
@@ -75,26 +60,27 @@ try:
         st.stop()
     r_billing.raise_for_status()
     billing = r_billing.json()
-
 except requests.RequestException as e:
     st.error(f"❌ Não foi possível conectar ao gateway/API em {API_BASE}. Detalhe: {e}")
     st.stop()
-
 
 if billing.get("status") != "active":
     st.warning("Sua licença ainda não está ativa.")
     if st.button("💳 Ativar Licença Anual (R$89,90)"):
         try:
-            r = requests.post(
-                f"{API_BASE}/billing/subscribe",
-                params={"plan": "yearly"},
-                headers=_auth_headers(),
-                timeout=20,
-            )
+            r = api_post("/billing/subscribe", params={"plan": "yearly"})
             r.raise_for_status()
+            init_point = r.json().get("init_point")
+            if init_point:
+                st.markdown(f"[Clique aqui para pagar e ativar seu acesso]({init_point})")
+            else:
+                st.error("Falha ao gerar o link de pagamento. Tente novamente mais tarde.")
             st.stop()
         except requests.RequestException as e:
             st.error(f"Erro ao tentar ativar licença: {e}")
+            st.stop()
+
+# Se chegou aqui, o usuário está autenticado e tem assinatura ativa
 
 # Continuação do painel original abaixo...
 # [o restante do código permanece inalterado e continuará após este ponto de verificação de login/assinatura]
