@@ -145,25 +145,50 @@ async def me(request: Request):
     u = user_from_internal(request) or require_user(request)
     return {"user_id": u.get("sub"), "email": u.get("email")}
 
+import httpx
+
 @app.post("/webhook")
 async def mercado_pago_webhook(request: Request):
     payload = await request.json()
     topic = request.query_params.get("topic")
-    if topic == "preapproval":
-        payer_email = payload.get("payer_email")
-        if not payer_email:
-            return JSONResponse(status_code=400, content={"error": "payer_email ausente"})
-        if USE_DB:
-            async with SessionLocal() as s:
-                res = await s.execute(select(User).where(User.email == payer_email))
-                user = res.scalar_one_or_none()
-                if user:
-                    await s.execute(update(User).where(User.id == user.id).values(
-                        access_expires_at=datetime.utcnow() + timedelta(days=365)
-                    ))
-                    await s.commit()
-        return {"ok": True}
-    return {"ignored": True}
+    if topic != "preapproval":
+        return {"ignored": True}
+
+    preapproval_id = payload.get("id") or payload.get("data", {}).get("id")
+    if not preapproval_id:
+        return JSONResponse(status_code=400, content={"error": "id da preapproval ausente"})
+
+    # Consulta segura à API do Mercado Pago
+    mp_token = os.environ.get("MP_ACCESS_TOKEN", "")
+    if not mp_token:
+        return JSONResponse(status_code=500, content={"error": "MP_ACCESS_TOKEN não configurado"})
+
+    url = f"https://api.mercadopago.com/preapproval/{preapproval_id}"
+    headers = {"Authorization": f"Bearer {mp_token}"}
+
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(url, headers=headers, timeout=20)
+        if resp.status_code != 200:
+            return JSONResponse(status_code=500, content={"error": "Falha ao consultar preapproval"})
+        data = resp.json()
+
+    if data.get("status") != "authorized":
+        return {"status": data.get("status", "unknown")}
+
+    payer_email = data.get("payer_email")
+    if not payer_email:
+        return JSONResponse(status_code=400, content={"error": "payer_email ausente"})
+
+    if USE_DB:
+        async with SessionLocal() as s:
+            res = await s.execute(select(User).where(User.email == payer_email))
+            user = res.scalar_one_or_none()
+            if user:
+                await s.execute(update(User).where(User.id == user.id).values(
+                    access_expires_at=datetime.utcnow() + timedelta(days=365)
+                ))
+                await s.commit()
+    return {"ok": True}
 
 @app.get("/billing/status")
 async def billing_status(request: Request):
